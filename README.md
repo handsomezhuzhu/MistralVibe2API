@@ -72,6 +72,21 @@ Accept: text/event-stream        # 流式时
 
 **这很可能是计量归属的真正开关**：Mistral 的 Vibe 表面按模型名路由（目录里还有 `zai-glm-5-3-flash-vibe-free` 这种 Vibe 专属变体），所以代理默认优先使用 `mistral-vibe-cli-*` 系列名字，其次才是通用模型名。
 
+### Vibe 表面目录全貌（实测 6 条）
+
+`GET /v1/model-catalog?surface=vibe-code` 只返回 Vibe 表面可用的模型（对比 `/v1/models` 的 63 个通用模型）：
+
+| id | 名称 | 上下文 | 备注 |
+| --- | --- | --- | --- |
+| `mistral-large-4-0` | Mistral Large 4 | 1M | 目录标记 recommended |
+| `mistral-medium-latest` | Mistral Medium 3.5 | 256K | 别名含 `mistral-vibe-cli-latest` |
+| `zai-glm-5-3` | GLM 5.3 | 1M | 无视觉 |
+| `zai-glm-5-3-flash` | GLM 5.3 Flash | 1M | |
+| `zai-glm-5-3-flash-vibe-free` | GLM 5.3 Flash（免套餐变体） | 256K | **不是"免费不计费"**，见下 |
+| `deepseek-v4-1-flash-1017` | DeepSeek V4.1 Flash | 1M | |
+
+**关于 `-vibe-free` 的实测结论**：它与普通版 `zai-glm-5-3-flash` 的响应头、usage、限流逐字段一致，目录条里也没有任何 pricing/free 字段，而 GLM 5.3 Flash 在 API 定价页明码标价（$0.15/M in、$0.5/M out）。它的上下文被砍到 256K、aliases 挂着普通版 id——形态上是"免费套餐用户的降配路由"，**不是不消耗额度的白嫖通道**。
+
 ### Mistral 靠什么区分"Vibe 用量"和"API 用量"
 
 公开信息拼出来的一致结论：
