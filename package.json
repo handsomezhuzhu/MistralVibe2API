@@ -22,6 +22,11 @@
   },
   "magpie": {
     "maxConcurrency": 4,
+    "name": "Mistral Vibe",
+    "summary": {
+      "en": "Use your Mistral Vibe API key in any agent: requests are forwarded to Mistral's official Vibe endpoint with the Vibe CLI's fingerprint.",
+      "zh": "在任意 agent 中使用 Mistral Vibe API key：请求以 Vibe CLI 的指纹转发到 Mistral 官方 Vibe 端点。"
+    },
     "icon": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23ff7000'/%3E%3Ctext x='32' y='41' font-family='Arial,sans-serif' font-size='20' font-weight='bold' fill='white' text-anchor='middle'%3EM2A%3C/text%3E%3C/svg%3E"
   }
 }
