@@ -343,9 +343,13 @@ function resetSpan(resetAt) {
   return ms > 0 ? Math.round(ms / 1000) : undefined;
 }
 
+const CURRENCY_SYMBOLS = { USD: "$", EUR: "€", GBP: "£" };
+
 function money(amount, currency) {
-  const symbol = currency === "USD" ? "$" : "";
-  return `${symbol}${amount.toFixed(2)}`;
+  const symbol = CURRENCY_SYMBOLS[currency] ?? "";
+  return symbol
+    ? `${symbol}${amount.toFixed(2)}`
+    : `${amount.toFixed(2)} ${currency ?? ""}`.trim();
 }
 
 /**
