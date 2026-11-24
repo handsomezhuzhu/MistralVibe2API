@@ -161,6 +161,77 @@ test("provider.models merges the upstream list, falling back on failure", async 
   }
 });
 
+test("provider.models prefers the Vibe-surface catalog", async () => {
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      if (req.url === "/v1/model-catalog?surface=vibe-code") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            models: [
+              {
+                id: "mistral-medium-latest",
+                label: "Mistral Medium 3.5",
+                aliases: ["mistral-vibe-cli-latest"],
+                max_context_length: 262144,
+              },
+            ],
+          })
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+  });
+  await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+
+  try {
+    const hooks = await plugin.server({ client: mockClient }, {
+      upstreamBase: `http://127.0.0.1:${upstream.address().port}/v1`,
+    });
+    const models = await hooks.provider.models(
+      { models: {} },
+      { auth: { type: "api", key: "k" } }
+    );
+    assert.equal(models["mistral-medium-latest"].name, "Mistral Medium 3.5");
+    assert.equal(models["mistral-medium-latest"].limit.context, 262144);
+  } finally {
+    upstream.close();
+  }
+});
+
+test("provider.models falls back to /v1/models when the catalog 404s", async () => {
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      if (req.url === "/v1/models") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: [{ id: "mistral-medium-latest" }, { id: "brand-new" }] }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+  });
+  await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+
+  try {
+    const hooks = await plugin.server({ client: mockClient }, {
+      upstreamBase: `http://127.0.0.1:${upstream.address().port}/v1`,
+    });
+    const models = await hooks.provider.models(
+      { models: { "mistral-medium-latest": { name: "Static" } } },
+      { auth: { type: "api", key: "k" } }
+    );
+    assert.ok(models["mistral-medium-latest"]);
+    assert.equal(models["brand-new"].name, "brand-new");
+  } finally {
+    upstream.close();
+  }
+});
+
 test("provider.models keeps the static list when the upstream fails", async () => {
   const hooks = await plugin.server({ client: mockClient }, {
     upstreamBase: "http://127.0.0.1:1/v1",

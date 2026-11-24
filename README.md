@@ -58,6 +58,20 @@ Accept: text/event-stream        # 流式时
 - 请求体就是标准 OpenAI chat completions；`reasoning_effort` 只对会推理的模型发；Mistral 拒绝 greedy sampling 带 `top_p`，所以 CLI 有温度时才带 `top_p`。
 - 响应是标准 OpenAI SSE（`choices[0].delta.content` 可能是字符串，也可能是 `[{type:"text"}]` / `[{type:"thinking"}]` 分片数组；usage 在最后一个 chunk）。
 
+### CLI 实际请求的模型名：`mistral-vibe-cli-*`
+
+用真实 Vibe key 实测 `/v1/models` 和 `/v1/model-catalog?surface=vibe-code`（CLI 自己读这个目录）发现：
+
+| 线报模型名 | 实际身份 |
+| --- | --- |
+| `mistral-vibe-cli-latest` | harness `LocalModelRoute` 的默认模型，即 Mistral Medium 3.5（`mistral-medium-latest` 的别名） |
+| `mistral-vibe-cli-with-tools` | 联网搜索等 utility 调用的默认模型 |
+| `mistral-vibe-cli-fast` | 快速 utility 模型（标题生成等） |
+
+模型目录原文（节选）：`{"id":"mistral-medium-latest","label":"Mistral Medium 3.5","aliases":["mistral-medium","mistral-medium-3.5","mistral-vibe-cli-latest"],"max_context_length":262144,...}`。
+
+**这很可能是计量归属的真正开关**：Mistral 的 Vibe 表面按模型名路由（目录里还有 `zai-glm-5-3-flash-vibe-free` 这种 Vibe 专属变体），所以代理默认优先使用 `mistral-vibe-cli-*` 系列名字，其次才是通用模型名。
+
 ### Mistral 靠什么区分"Vibe 用量"和"API 用量"
 
 公开信息拼出来的一致结论：
@@ -71,7 +85,14 @@ Accept: text/event-stream        # 流式时
 1. 同一个端点 `https://api.mistral.ai/v1/chat/completions`；
 2. 同一个 Vibe key（Bearer）；
 3. 同一个 User-Agent（`speakeasy-sdk/python 3.5.0 …`，可用环境变量/插件选项覆盖，SDK 升级时跟着改）；
-4. **只透传 `content-type` 和 `accept`**，其余客户端头全部剥掉（`user-agent`、`x-stainless-*`、`x-title`、`origin`、`referer`、`anthropic-*`、`x-api-key`、cookie……）， Mistral 看不到前端是哪个 harness。
+4. **优先使用 Vibe 表面的模型名**（`mistral-vibe-cli-latest` 等），这是 CLI 真正发上去的线报名；
+5. **只透传 `content-type` 和 `accept`**，其余客户端头全部剥掉（`user-agent`、`x-stainless-*`、`x-title`、`origin`、`referer`、`anthropic-*`、`x-api-key`、cookie……）， Mistral 看不到前端是哪个 harness。
+
+实测补充（2026-11，真实 Vibe key）：
+
+- 三种组合（Vibe UA + vibe-cli 模型 / Claude UA + vibe-cli 模型 / 无 UA + 通用模型）都返回 200，限流头一致（1M tokens/min、2000 req/min，即 Vibe 套餐级限额，跟着 key 走）；
+- `console.mistral.ai/api/vibe/whoami` 用该 key 可查（返回 `plan_type`、`api_base`、`vibe_base`）；其余用量端点（`/api/vibe/usage` 等）是 dashboard 会话鉴权，API key 拿不到——所以插件的 usage 钩子默认不查；
+- 代理全链路（OpenAI 流式、Anthropic `/v1/messages`、`mistral-vibe-cli-latest` 模型）实测通过。
 
 ---
 
@@ -102,7 +123,7 @@ magpie provider test mistral-vibe
 | `extraHeaders` | 额外上游头，如 `{"origin": "https://chat.mistral.ai"}` |
 | `usageUrl` | 可选用量查询地址，返回 `{plan, used, limit}`；Mistral 没有公开的按 key 用量 API，默认不查 |
 
-模型列表：插件启动时带一份静态目录（`mistral-medium/large/small-latest`、`codestral-latest`、`devstral-*`、`magistral-*`、`ministral-*`、`pixtral-large-latest`、`zai-glm-5-3` 等），登录后会向上游 `/v1/models` 合并账号实际可用的模型。
+模型列表：插件启动时带一份静态目录（优先 `mistral-vibe-cli-latest` 等 Vibe 线报名，另有 `mistral-medium/large/small-latest`、`mistral-large-4-0`、`codestral-latest`、`magistral-*`、`ministral-*`、`pixtral-large-latest`、`zai-glm-5-3`、`deepseek-v4-1-flash-1017` 等），登录后先向上游 `/v1/model-catalog?surface=vibe-code`（CLI 同款目录）合并账号实际可用的模型，失败再退 `/v1/models`，再失败用静态目录。
 
 ## 方案二：独立反代服务器
 

@@ -136,13 +136,51 @@ export function resolveApiKey(clientHeaders, config) {
   return clientKey || null;
 }
 
-/** Static model catalog (Mistral la Plateforme chat models). */
+/**
+ * Static model catalog. Names verified against the live endpoints with a Vibe
+ * key: `GET /v1/models` and `GET /v1/model-catalog?surface=vibe-code`.
+ *
+ * The `mistral-vibe-cli-*` entries are the wire names the Vibe CLI itself
+ * sends (the harness's LocalModelRoute default is `mistral-vibe-cli-latest`,
+ * an alias of mistral-medium-latest). Mistral's Vibe surface serves them, so
+ * the proxy offers them first: usage is most likely attributed to the Vibe
+ * allowance when the request carries a Vibe-surface model.
+ */
 export const MODELS = {
-  "mistral-medium-latest": {
-    name: "Mistral Medium 3.5",
-    limit: { context: 131072, output: 32768 },
+  "mistral-vibe-cli-latest": {
+    name: "Mistral Vibe CLI (Medium 3.5)",
+    limit: { context: 262144, output: 32768 },
     reasoning: true,
     tool_call: true,
+    modalities: { input: ["text", "image"] },
+    attachment: true,
+  },
+  "mistral-vibe-cli-with-tools": {
+    name: "Mistral Vibe CLI with Tools (Medium 3.5)",
+    limit: { context: 262144, output: 32768 },
+    reasoning: true,
+    tool_call: true,
+  },
+  "mistral-vibe-cli-fast": {
+    name: "Mistral Vibe CLI Fast",
+    limit: { context: 262144, output: 32768 },
+    tool_call: true,
+  },
+  "mistral-medium-latest": {
+    name: "Mistral Medium 3.5",
+    limit: { context: 262144, output: 32768 },
+    reasoning: true,
+    tool_call: true,
+    modalities: { input: ["text", "image"] },
+    attachment: true,
+  },
+  "mistral-large-4-0": {
+    name: "Mistral Large 4",
+    limit: { context: 1048576, output: 32768 },
+    reasoning: true,
+    tool_call: true,
+    modalities: { input: ["text", "image"] },
+    attachment: true,
   },
   "mistral-large-latest": {
     name: "Mistral Large 3",
@@ -160,19 +198,9 @@ export const MODELS = {
     limit: { context: 262144, output: 32768 },
     tool_call: true,
   },
-  "devstral-small-latest": {
-    name: "Devstral Small",
-    limit: { context: 131072, output: 32768 },
-    tool_call: true,
-  },
-  "devstral-medium-latest": {
-    name: "Devstral Medium",
-    limit: { context: 131072, output: 32768 },
-    tool_call: true,
-  },
   "magistral-medium-latest": {
     name: "Magistral Medium",
-    limit: { context: 131072, output: 32768 },
+    limit: { context: 262144, output: 32768 },
     reasoning: true,
     tool_call: true,
   },
@@ -205,14 +233,20 @@ export const MODELS = {
     attachment: true,
   },
   "zai-glm-5-3": {
-    name: "Z.ai GLM 5.3",
-    limit: { context: 200000, output: 32768 },
+    name: "GLM 5.3 (Mistral Hosted)",
+    limit: { context: 1048576, output: 32768 },
     reasoning: true,
     tool_call: true,
   },
-  "zai-glm-5-2": {
-    name: "Z.ai GLM 5.2",
-    limit: { context: 200000, output: 32768 },
+  "zai-glm-5-3-flash": {
+    name: "GLM 5.3 Flash (Mistral Hosted)",
+    limit: { context: 262144, output: 32768 },
+    reasoning: true,
+    tool_call: true,
+  },
+  "deepseek-v4-1-flash-1017": {
+    name: "DeepSeek V4.1 Flash (Mistral Hosted)",
+    limit: { context: 1048576, output: 32768 },
     reasoning: true,
     tool_call: true,
   },
@@ -234,6 +268,37 @@ export function openAIModelsFromUpstream(data, baseModels) {
           limit: { context: 131072, output: 32768 },
           tool_call: true,
         };
+  }
+  return out;
+}
+
+/**
+ * Build a model list from the Vibe-surface catalog
+ * (`GET /v1/model-catalog?surface=vibe-code`). Each entry carries its own
+ * aliases, context window and capabilities, and every alias resolves to the
+ * same entry on Mistral's side.
+ */
+export function vibeCatalogFromUpstream(data, baseModels) {
+  const base = baseModels ?? MODELS;
+  const out = {};
+  for (const entry of data?.models ?? []) {
+    const id = entry?.id;
+    if (typeof id !== "string" || !id) continue;
+    const known = base[id];
+    const context = Number(entry?.max_context_length) || 131072;
+    const model = known
+      ? { ...known }
+      : {
+          name: entry?.label ?? id,
+          limit: { context, output: 32768 },
+          tool_call: true,
+        };
+    model.name = entry?.label ?? model.name ?? id;
+    model.limit = { ...model.limit, context };
+    if (Array.isArray(entry?.aliases)) {
+      model.aliases = entry.aliases;
+    }
+    out[id] = model;
   }
   return out;
 }

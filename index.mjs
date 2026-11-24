@@ -19,6 +19,7 @@ import {
   openAIModelsFromUpstream,
   sanitizeHeaders,
   UPSTREAM_BASE,
+  vibeCatalogFromUpstream,
 } from "./src/core.mjs";
 
 const PROVIDER = "mistral-vibe";
@@ -116,14 +117,28 @@ const MistralVibePlugin = async (_input, options = {}) => {
       id: PROVIDER,
       async models(provider, { auth } = {}) {
         if (auth?.type !== "api") return provider.models;
+        const headers = sanitizeHeaders(null, {
+          apiKey: auth.key,
+          userAgent: opts.userAgent,
+          extraHeaders: opts.extraHeaders,
+        });
+        // The Vibe-surface catalog first: it is what the CLI itself reads, so
+        // it names the models (and aliases) the Vibe allowance is served on.
         try {
-          const response = await fetch(`${opts.upstreamBase}/models`, {
-            headers: sanitizeHeaders(null, {
-              apiKey: auth.key,
-              userAgent: opts.userAgent,
-              extraHeaders: opts.extraHeaders,
-            }),
-          });
+          const catalog = await fetch(
+            `${opts.upstreamBase}/model-catalog?surface=vibe-code`,
+            { headers }
+          );
+          if (catalog.ok) {
+            const data = await catalog.json();
+            const merged = vibeCatalogFromUpstream(data, provider.models);
+            if (Object.keys(merged).length) return merged;
+          }
+        } catch {
+          // fall through to /v1/models
+        }
+        try {
+          const response = await fetch(`${opts.upstreamBase}/models`, { headers });
           if (!response.ok) return provider.models;
           const data = await response.json();
           const merged = openAIModelsFromUpstream(data, provider.models);

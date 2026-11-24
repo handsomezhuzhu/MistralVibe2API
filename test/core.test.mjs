@@ -131,6 +131,38 @@ test("openAIModelsFromUpstream merges upstream ids with the static catalog", () 
   assert.equal(merged[""], undefined);
 });
 
+test("vibeCatalogFromUpstream reads the Vibe-surface catalog", async () => {
+  const { vibeCatalogFromUpstream } = await import("../src/core.mjs");
+  const merged = vibeCatalogFromUpstream({
+    models: [
+      {
+        id: "mistral-medium-latest",
+        label: "Mistral Medium 3.5",
+        aliases: ["mistral-medium", "mistral-vibe-cli-latest"],
+        max_context_length: 262144,
+        parameters: { reasoning: ["none", "high"] },
+        capabilities: { completion_chat: true, function_calling: true, vision: true },
+      },
+      { id: "brand-new", label: "Brand New", max_context_length: 999999 },
+    ],
+  });
+  assert.equal(merged["mistral-medium-latest"].name, "Mistral Medium 3.5");
+  assert.equal(merged["mistral-medium-latest"].limit.context, 262144);
+  assert.deepEqual(merged["mistral-medium-latest"].aliases, [
+    "mistral-medium",
+    "mistral-vibe-cli-latest",
+  ]);
+  assert.equal(merged["brand-new"].limit.context, 999999);
+});
+
+test("the catalog ships the Vibe CLI wire names", () => {
+  // The harness's LocalModelRoute default; usage is attributed per model.
+  assert.ok(MODELS["mistral-vibe-cli-latest"]);
+  assert.ok(MODELS["mistral-vibe-cli-with-tools"]);
+  assert.ok(MODELS["mistral-vibe-cli-fast"]);
+  assert.equal(MODELS["mistral-large-4-0"].limit.context, 1048576);
+});
+
 test("loadConfig reads env with sane defaults", () => {
   const config = loadConfig({});
   assert.equal(config.upstreamBase, UPSTREAM_BASE);
