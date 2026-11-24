@@ -116,7 +116,10 @@ Accept: text/event-stream        # 流式时
 插件把 Vibe key 注册成一个供应商，magpie 网关负责协议转换（Anthropic / Responses / Chat 互转）、多账号、故障切换，插件的 `fetch` 负责把请求改成 Vibe CLI 的指纹后转发。
 
 ```bash
-# 本地目录直接加载（magpie 会自己下载 Bun 运行时）
+# 从 git 仓库安装（推荐，任何人可用）
+magpie plugin add github:handsomezhuzhu/MistralVibe2API
+
+# 或本地目录就地加载（不改动任何文件）
 magpie plugin add /path/to/MistralVibe2API
 
 # 登录：粘贴你的 Vibe key
@@ -127,7 +130,9 @@ magpie plugin
 magpie provider test mistral-vibe
 ```
 
-之后所有 agent 都可以用 `mistral-vibe/mistral-medium-latest` 这样的模型 id。
+之后所有 agent 都可以用 `mistral-vibe/mistral-vibe-cli-latest` 这样的模型 id。
+
+> 首次添加插件时 magpie 会自动下载 Bun 运行时（约 110MB），之后所有插件都跑在它上面。
 
 插件选项（`magpie plugin options mistral-vibe '<json>'`）：
 
