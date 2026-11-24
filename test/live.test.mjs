@@ -37,24 +37,33 @@ const API_KEY = process.env.MISTRAL_API_KEY || process.env.VIBE_API_KEY;
 const BASE = (process.env.MISTRAL_UPSTREAM_BASE ?? UPSTREAM_BASE).replace(/\/+$/, "");
 /** Models the regression prefers, most widely available first. */
 const MODEL_PREFERENCE = [
-  "zai-glm-5-3-flash-vibe-free", // Free-plan key: the only GLM Flash it may use
+  "zai-glm-5-3-flash-vibe-free", // Free-plan Vibe keys: the only GLM Flash they may use
   "zai-glm-5-3-flash",
   "deepseek-v4-1-flash-1017",
   "mistral-large-4-0",
-  "mistral-vibe-cli-latest", // the CLI default wire name; the last resort
+  "mistral-vibe-cli-latest", // the CLI default wire name; every key reaches it
 ];
 const live = { skip: !API_KEY };
 
 let setupCache = null;
 
-/** One-time discovery: what this key can reach, and which model to chat with. */
+/**
+ * One-time discovery: which model this key can actually chat with.
+ *
+ * Model access is gated per key, not per account: the Vibe-surface catalog
+ * lists all six models for every key on the account, yet a Free-plan Vibe
+ * key gets tier_not_allowed on the full models and an API key gets it on the
+ * *-vibe-free variant. So the candidates are probed with a minimal request
+ * and the first that answers 200 wins.
+ */
 async function ensureSetup() {
   if (setupCache) return setupCache;
   const headers_ = headers();
   const ids = new Set();
   // The Vibe-surface catalog is the authoritative list for the surface the
-  // proxy forwards to (it is where the *-vibe-free variants live), while
-  // /v1/models is the wider API list; a model can appear in either.
+  // proxy forwards to, while /v1/models is the wider API list; a model can
+  // appear in either, and being listed still does not mean this key may use
+  // it — hence the probing below.
   for (const [path, read] of [
     ["/model-catalog?surface=vibe-code", (data) => (data.models ?? []).map((m) => m?.id)],
     ["/models", (data) => (data.data ?? []).map((m) => m?.id)],
@@ -70,9 +79,21 @@ async function ensureSetup() {
     }
   }
   const liveIds = [...ids];
-  const model =
-    MODEL_PREFERENCE.find((id) => liveIds.includes(id)) ??
-    MODEL_PREFERENCE[MODEL_PREFERENCE.length - 1];
+
+  let model = null;
+  for (const candidate of MODEL_PREFERENCE) {
+    const probe = await chat({
+      model: candidate,
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 1,
+    });
+    if (probe.status === 200) {
+      model = candidate;
+      break;
+    }
+  }
+  model = model ?? MODEL_PREFERENCE[MODEL_PREFERENCE.length - 1];
+
   setupCache = {
     liveIds,
     model,
