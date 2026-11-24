@@ -229,6 +229,7 @@ Mistral 有两种 key（同一账户下两条额度池）：**Vibe key**（`chat
 插件因此：
 
 1. **登录时识别并标注**：`authorize` 调 whoami 判定类型，账号显示为 `vibe · …1f01` / `api · …1LwX`，类型存入 `metadata.keyType`；key 被拒时明确报错，whoami 不可达时按 `unknown` 接纳（不影响使用）
+2. **已有 key 自动补识别**：在插件升级前登录的账号没有 `metadata.keyType`，loader（首次使用）和 usage（额度读取）会调一次 whoami 补判，并写回账号——**每个 key 只问一次 whoami，不是每次读取都问**。写回用快照比对防竞态（识别期间账号被登出/刷新则放弃写入），写入失败不影响当次读取
 2. **usage 报该 key 真正消耗的额度池**：Vibe key 报 Vibe 池，API key 报 API 池；另一个池作为 `aside` 窗口展示（卡片可见、路由不读）
 3. **按 `keyPreference` 决定谁接流量**：
    - `vibe`（默认）：Vibe key 的池计数，API key 全 aside（standby）——流量优先走 Vibe 池，**Vibe 池耗尽后自动故障切换到 API key**（窗口 renewal 后自动回来）

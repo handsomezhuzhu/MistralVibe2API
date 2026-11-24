@@ -8,10 +8,11 @@
  * mistralai Python SDK the CLI ships, with every header that could name the
  * calling harness stripped.
  *
- * The login tells a Vibe key (plan_type CHAT) from an API key (plan_type
- * API) and labels the account accordingly, and the usage hook reports the
- * allowance pool that key's usage is actually billed to, so the routing
- * strategy can prefer one key type over the other.
+ * Every account's key is typed — Vibe key or API key — at login and, for
+ * accounts that predate the typing, on first use: the type is written back
+ * to the account so it costs one whoami call per key, not one per read. The
+ * usage hook then reports the allowance pool that key's usage is actually
+ * billed to, which is what the routing preference keys off.
  *
  * Add it with:
  *   magpie plugin add /path/to/MistralVibe2API
@@ -51,35 +52,70 @@ function resolveOptions(options = {}) {
   };
 }
 
-/**
- * The key type of an account: what authorize stored, or a fresh whoami read
- * for accounts that signed in before the type was recorded.
- */
-async function keyTypeOf(auth, opts) {
-  const stored = auth?.metadata?.keyType;
-  if (stored === "vibe" || stored === "api") return stored;
-  const info = await identifyKey(auth.key, opts);
-  return info.keyType;
-}
-
-/**
- * Which pool routing reads for this account, under the preference:
- * "quota" counts every key's own pool (routing balances by what is left),
- * while "vibe"/"api" count only the preferred type's pool — the other type
- * gets "none", its windows all aside: shown on the card but never pulling
- * traffic, still there for failover once the preferred pool is spent.
- */
-function countingPool(keyType, preference) {
-  if (preference === "quota") return "all";
-  const own = poolForKeyType(keyType);
-  return own === poolForKeyType(preference) ? own : "none";
-}
-
 // Kept local on purpose: magpie treats every exported function as a plugin,
 // so the plugin itself is only reachable through the default { id, server }
 // export below (the OpenCode v1 shape).
-const MistralVibePlugin = async (_input, options = {}) => {
+const MistralVibePlugin = async (input, options = {}) => {
   const opts = resolveOptions(options);
+  const client = input?.client;
+
+  /**
+   * The account's key type: what authorize stored, or a fresh whoami read
+   * for accounts that signed in before the type was recorded. A type read
+   * this way is written back to the account, so recognition costs one
+   * whoami call per key rather than one per read.
+   *
+   * The write follows the community pattern for a non-conditional
+   * auth.set: re-read the account and drop the write when anything changed
+   * underneath us (a sign-out or refresh that landed while whoami was
+   * pending), and treat a failed write as best effort — this read still
+   * uses the detected type.
+   */
+  async function keyTypeOf(getAuth) {
+    const auth = await getAuth();
+    const stored = auth?.metadata?.keyType;
+    if (stored === "vibe" || stored === "api") return stored;
+
+    const info = await identifyKey(auth?.key, opts);
+    if (info.keyType !== "vibe" && info.keyType !== "api") return info.keyType;
+
+    if (client?.auth?.set && auth) {
+      try {
+        const snapshot = JSON.stringify(auth);
+        if (JSON.stringify(await getAuth()) === snapshot) {
+          await client.auth.set({
+            path: { id: PROVIDER },
+            body: {
+              ...auth,
+              metadata: {
+                ...auth.metadata,
+                keyType: info.keyType,
+                planType: info.planType,
+                planName: info.planName,
+              },
+            },
+          });
+        }
+      } catch {
+        // persisting is best effort: routing still uses the detected type
+      }
+    }
+    return info.keyType;
+  }
+
+  /**
+   * Which pool routing reads for this account, under the preference:
+   * "quota" counts every key's own pool (routing balances by what is
+   * left), while "vibe"/"api" count only the preferred type's pool — the
+   * other type gets "none", its windows all aside: shown on the card but
+   * never pulling traffic, still there for failover once the preferred
+   * pool is spent.
+   */
+  function countingPool(keyType, preference) {
+    if (preference === "quota") return "all";
+    const own = poolForKeyType(keyType);
+    return own === poolForKeyType(preference) ? own : "none";
+  }
 
   return {
     config: async (cfg) => {
@@ -146,6 +182,9 @@ const MistralVibePlugin = async (_input, options = {}) => {
         const auth = await getAuth();
         if (auth?.type !== "api") return {};
         const apiKey = auth.key;
+        // Accounts that signed in before key typing existed get recognised
+        // here, once: the type is written back for later reads.
+        keyTypeOf(getAuth).catch(() => {});
         return {
           baseURL: opts.upstreamBase,
           apiKey,
@@ -199,7 +238,7 @@ const MistralVibePlugin = async (_input, options = {}) => {
         }
 
         try {
-          const keyType = await keyTypeOf(auth, opts);
+          const keyType = await keyTypeOf(getAuth);
           const billing = await fetchBilling(auth.key, opts);
           const planName = billing.subscription?.plan_name ?? auth.metadata?.planName;
           const plan = planName
@@ -263,10 +302,4 @@ const MistralVibePlugin = async (_input, options = {}) => {
 export default { id: PROVIDER, server: MistralVibePlugin };
 
 // Helpers for tests; an object export is never treated as a plugin.
-export const _internal = {
-  resolveOptions,
-  sanitizeHeaders,
-  loadConfig,
-  keyTypeOf,
-  countingPool,
-};
+export const _internal = { resolveOptions, sanitizeHeaders, loadConfig };

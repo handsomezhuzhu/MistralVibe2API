@@ -172,6 +172,156 @@ test("authorize requires a key", async () => {
   assert.equal(result.type, "failed");
 });
 
+/* ---------------- backfilling the type onto existing keys ---------------- */
+
+/** A client that records auth.set calls and can swap the stored auth. */
+function recordingClient(initial) {
+  let stored = initial;
+  const sets = [];
+  return {
+    sets,
+    get stored() {
+      return stored;
+    },
+    swap(next) {
+      stored = next;
+    },
+    auth: {
+      set: async ({ body }) => {
+        sets.push(body);
+        stored = body;
+      },
+      remove: async () => {},
+    },
+    app: { log: async () => {} },
+  };
+}
+
+test("an account that predates key typing is recognised and written back", async () => {
+  const mock = await startAccountMock({ planType: "CHAT" });
+
+  try {
+    // an old login: {type:"api", key} with no metadata
+    const legacyAuth = { type: "api", key: "vibekey" };
+    const client = recordingClient(legacyAuth);
+    const hooks = await plugin.server({ client }, {
+      upstreamBase: `http://127.0.0.1:${mock.port}/v1`,
+      consoleBase: `http://127.0.0.1:${mock.port}`,
+    });
+    const getAuth = async () => client.stored;
+
+    const usage = await hooks.auth.usage(getAuth);
+    assert.equal(usage.plan, "INDIVIDUAL · vibe key");
+    assert.equal(usage.windows[0].aside, false, "the Vibe pool counts");
+
+    // the detected type was written back to the account
+    assert.equal(client.sets.length, 1, "one write-back");
+    assert.equal(client.sets[0].metadata.keyType, "vibe");
+    assert.equal(client.sets[0].key, "vibekey", "the key is preserved");
+
+    // and the next read no longer asks whoami
+    const seenBefore = mock.seen.length;
+    await hooks.auth.usage(getAuth);
+    const whoamiCalls = mock.seen.filter((r) => r.url === "/api/vibe/whoami").length;
+    assert.equal(whoamiCalls, 1, "whoami is asked once per key, not once per read");
+    assert.ok(mock.seen.length >= seenBefore);
+  } finally {
+    mock.server.close();
+  }
+});
+
+test("the loader backfills the type for an account that never opens usage", async () => {
+  const mock = await startAccountMock({ planType: "API" });
+
+  try {
+    const client = recordingClient({ type: "api", key: "apikey" });
+    const hooks = await plugin.server({ client }, {
+      upstreamBase: `http://127.0.0.1:${mock.port}/v1`,
+      consoleBase: `http://127.0.0.1:${mock.port}`,
+    });
+    const loaded = await hooks.auth.loader(async () => client.stored);
+    assert.equal(loaded.baseURL, `http://127.0.0.1:${mock.port}/v1`);
+    // the loader does not block on the recognition
+    assert.equal(typeof loaded.fetch, "function");
+
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(client.sets.length, 1, "the type was written back");
+    assert.equal(client.sets[0].metadata.keyType, "api");
+  } finally {
+    mock.server.close();
+  }
+});
+
+test("a sign-out that lands while whoami is pending wins: no write-back", async () => {
+  const mock = await startAccountMock({ planType: "CHAT" });
+
+  try {
+    const client = recordingClient({ type: "api", key: "vibekey" });
+    const hooks = await plugin.server({ client }, {
+      upstreamBase: `http://127.0.0.1:${mock.port}/v1`,
+      consoleBase: `http://127.0.0.1:${mock.port}`,
+    });
+    // the hook reads the account once, keyTypeOf reads it again, and while
+    // whoami is in flight the account is replaced — so the re-read before
+    // the write sees the new account and the write is dropped
+    const original = client.stored;
+    let reads = 0;
+    const getAuth = async () => {
+      reads += 1;
+      if (reads <= 2) return original;
+      client.swap({ type: "api", key: "otherkey" });
+      return client.stored;
+    };
+    await hooks.auth.usage(getAuth);
+    assert.equal(client.sets.length, 0, "the write is dropped when the account moved");
+  } finally {
+    mock.server.close();
+  }
+});
+
+test("an unreachable whoami leaves the account untouched and still reads usage", async () => {
+  const mock = await startAccountMock({ planType: "CHAT" });
+
+  try {
+    const client = recordingClient({ type: "api", key: "vibekey" });
+    const hooks = await plugin.server({ client }, {
+      upstreamBase: `http://127.0.0.1:${mock.port}/v1`,
+      consoleBase: "http://127.0.0.1:1",
+    });
+    const usage = await hooks.auth.usage(async () => client.stored);
+    assert.equal(client.sets.length, 0, "nothing is written when the type is unknown");
+    assert.equal(usage.windows[0].aside, false, "unknown keys keep the Vibe pool counting");
+  } finally {
+    mock.server.close();
+  }
+});
+
+test("an account whose write-back fails still reads usage", async () => {
+  const mock = await startAccountMock({ planType: "CHAT" });
+
+  try {
+    const stored = { type: "api", key: "vibekey" };
+    const client = {
+      auth: {
+        set: async () => {
+          throw new Error("disk full");
+        },
+        remove: async () => {},
+      },
+      app: { log: async () => {} },
+    };
+    const hooks = await plugin.server({ client }, {
+      upstreamBase: `http://127.0.0.1:${mock.port}/v1`,
+      consoleBase: `http://127.0.0.1:${mock.port}`,
+    });
+    const usage = await hooks.auth.usage(async () => stored);
+    assert.equal(usage.plan, "INDIVIDUAL · vibe key");
+    assert.equal(usage.windows.length, 2);
+  } finally {
+    mock.server.close();
+  }
+});
+
 test("usage hook stays empty without a usageUrl", async () => {
   const hooks = await plugin.server({ client: mockClient }, {});
   const usage = await hooks.auth.usage(async () => ({ type: "api", key: "k" }));

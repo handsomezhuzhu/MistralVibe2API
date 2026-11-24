@@ -331,7 +331,10 @@ export async function identifyKey(apiKey, opts = {}) {
     extraHeaders: opts.extraHeaders,
   });
   try {
-    const response = await fetch(`${consoleBase}/api/vibe/whoami`, { headers });
+    const response = await fetch(`${consoleBase}/api/vibe/whoami`, {
+      headers,
+      signal: AbortSignal.timeout(5000),
+    });
     if (response.status === 401 || response.status === 403) {
       return { keyType: "unknown", status: response.status };
     }
