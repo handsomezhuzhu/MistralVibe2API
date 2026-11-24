@@ -1,0 +1,27 @@
+{
+  "name": "mistral-vibe-2api",
+  "version": "0.1.0",
+  "description": "Reverse proxy that keeps a Mistral Vibe API key usable inside third-party agents: forwards requests with the official Vibe CLI's fingerprint. Works as a magpie/OpenCode provider plugin or as a standalone OpenAI/Anthropic-compatible proxy.",
+  "type": "module",
+  "main": "./index.mjs",
+  "license": "MIT",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "magpie",
+    "mistral",
+    "mistral-vibe",
+    "reverse-proxy"
+  ],
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "magpie": {
+    "maxConcurrency": 4,
+    "icon": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23ff7000'/%3E%3Ctext x='32' y='41' font-family='Arial,sans-serif' font-size='20' font-weight='bold' fill='white' text-anchor='middle'%3EM2A%3C/text%3E%3C/svg%3E"
+  }
+}
