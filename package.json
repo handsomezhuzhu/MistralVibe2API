@@ -15,8 +15,15 @@
   ],
   "scripts": {
     "start": "node src/server.mjs",
-    "test": "node --test test/"
+    "test": "node --test",
+    "test:live": "node --test test/live.test.mjs"
   },
+  "files": [
+    "index.mjs",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=18"
   },

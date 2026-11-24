@@ -164,7 +164,7 @@ test("POST /v1/chat/completions passes non-streaming replies through", async () 
     const res = await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "mistral-small-latest", messages: [] }),
+      body: JSON.stringify({ model: "deepseek-v4-1-flash-1017", messages: [] }),
     });
     assert.equal(res.status, 200);
     const json = await res.json();
@@ -335,7 +335,7 @@ test("GET /v1/models falls back to the static catalog when upstream fails", asyn
     assert.equal(res.status, 200);
     const json = await res.json();
     assert.ok(json.data.some((m) => m.id === "mistral-medium-latest"));
-    assert.ok(json.data.some((m) => m.id === "codestral-latest"));
+    assert.ok(json.data.some((m) => m.id === "deepseek-v4-1-flash-1017"));
   } finally {
     proxy.server.close();
     dead.close();
@@ -379,7 +379,7 @@ test("GET /health reports the service", async () => {
 test("MODEL_MAP rewrites the model before it reaches Mistral", async () => {
   const upstream = await startMockUpstream();
   const proxy = await startProxy(upstream.port, {
-    MODEL_MAP: '{"fast":"mistral-small-latest"}',
+    MODEL_MAP: '{"fast":"deepseek-v4-1-flash-1017"}',
   });
 
   try {
@@ -388,7 +388,7 @@ test("MODEL_MAP rewrites the model before it reaches Mistral", async () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ model: "fast", messages: [] }),
     });
-    assert.equal(JSON.parse(upstream.received[0].body).model, "mistral-small-latest");
+    assert.equal(JSON.parse(upstream.received[0].body).model, "deepseek-v4-1-flash-1017");
   } finally {
     proxy.server.close();
     upstream.server.close();
@@ -404,7 +404,7 @@ test("GET /usage reports local stats plus the live billing read", async () => {
     const chat = await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "mistral-small-latest", messages: [] }),
+      body: JSON.stringify({ model: "deepseek-v4-1-flash-1017", messages: [] }),
     });
     assert.equal(chat.status, 200);
     await readAll(chat);
@@ -419,7 +419,7 @@ test("GET /usage reports local stats plus the live billing read", async () => {
     assert.equal(json.local.total.output_tokens, 4);
     assert.equal(json.local.total.cost_known, true);
     assert.ok(json.local.total.cost_usd > 0);
-    assert.ok(json.local.by_model["mistral-small-latest"]);
+    assert.ok(json.local.by_model["deepseek-v4-1-flash-1017"]);
     // billing read flows through the same upstream
     assert.equal(json.billing.subscription.plan_name, "INDIVIDUAL");
     assert.equal(json.billing.budget.vibe_budget.initial_budget, 300);
@@ -438,7 +438,7 @@ test("streaming completions count usage from the final chunk", async () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: "mistral-small-latest",
+        model: "deepseek-v4-1-flash-1017",
         stream: true,
         messages: [],
       }),

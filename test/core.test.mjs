@@ -176,13 +176,13 @@ test("loadConfig reads env with sane defaults", () => {
     VIBE_USER_AGENT: "ua/1.0",
     VIBE_EXTRA_HEADERS: '{"x-tenant":"acme"}',
     ALLOW_CLIENT_KEY: "1",
-    MODEL_MAP: '{"fast":"mistral-small-latest"}',
+    MODEL_MAP: '{"fast":"deepseek-v4-1-flash-1017"}',
   });
   assert.equal(custom.apiKey, "k");
   assert.equal(custom.userAgent, "ua/1.0");
   assert.deepEqual(custom.extraHeaders, { "x-tenant": "acme" });
   assert.equal(custom.allowClientKey, true);
-  assert.deepEqual(custom.modelMap, { fast: "mistral-small-latest" });
+  assert.deepEqual(custom.modelMap, { fast: "deepseek-v4-1-flash-1017" });
 });
 
 test("UPSTREAM_BASE points at the official Vibe endpoint", () => {

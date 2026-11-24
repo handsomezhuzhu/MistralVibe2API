@@ -1,5 +1,7 @@
 # MistralVibe2API
 
+[![CI](https://github.com/handsomezhuzhu/MistralVibe2API/actions/workflows/ci.yml/badge.svg)](https://github.com/handsomezhuzhu/MistralVibe2API/actions/workflows/ci.yml)
+
 把你的 **Mistral Vibe API key** 变成一个任何第三方 agent 都能用的供应商：一个反代，把请求伪装成官方 Vibe CLI 发出的样子转发给 Mistral。
 
 可以当 **magpie / OpenCode 插件**用（推荐），也可以当**独立反代服务器**用（OpenAI 兼容 + Anthropic 兼容）。
@@ -202,7 +204,7 @@ magpie provider test mistral-vibe
 | `extraHeaders` | 额外上游头，如 `{"origin": "https://chat.mistral.ai"}` |
 | `usageUrl` | 可选用量查询地址，返回 `{plan, used, limit}`；Mistral 没有公开的按 key 用量 API，默认不查 |
 
-模型列表：插件启动时带一份静态目录（优先 `mistral-vibe-cli-latest` 等 Vibe 线报名，另有 `mistral-medium/large/small-latest`、`mistral-large-4-0`、`codestral-latest`、`magistral-*`、`ministral-*`、`pixtral-large-latest`、`zai-glm-5-3`、`deepseek-v4-1-flash-1017` 等），登录后先向上游 `/v1/model-catalog?surface=vibe-code`（CLI 同款目录）合并账号实际可用的模型，失败再退 `/v1/models`，再失败用静态目录。
+模型列表：插件启动时带一份静态目录，严格对齐 Vibe 表面（`mistral-vibe-cli-latest` 等 CLI 线报名 + 目录里的 6 个模型），登录后先向上游 `/v1/model-catalog?surface=vibe-code`（CLI 同款目录）合并账号实际可用的模型，失败再退 `/v1/models`，再失败用静态目录。
 
 ## 方案二：独立反代服务器
 
@@ -262,15 +264,24 @@ export OPENAI_API_KEY=任意占位符
 ## 测试
 
 ```bash
-node --test        # 63 个用例：头改写、Anthropic 转换、SSE 编解码、计费/成本、端到端（mock 上游）
+node --test                              # 全部用例（live 无 key 自动跳过）
+MISTRAL_API_KEY=mstrl_… node --test test/live.test.mjs   # 线上回归（真调 Mistral）
 ```
 
-覆盖的关键行为：
+覆盖内容：
 
-- 转发请求只带 `content-type`/`accept` + Vibe key + 官方 UA，客户端身份头全部剥除；
-- 流式 / 非流式透传，上游错误（401/429…）原样返回；
-- Anthropic ⇄ OpenAI 双向转换：文本、图片、`tool_use`/`tool_result`、`thinking` 块、usage、`stop_reason` 映射；
-- 插件各钩子（config / auth.loader / provider.models / usage）的形态与行为。
+- **单元/契约**：头改写、Anthropic ⇄ OpenAI 双向转换（tool_use / thinking / 缓存字段）、SSE 编解码、计费端点与成本公式（CLI 同款）、包与插件契约（`package.json` 字段、发现关键词、防 key 泄漏扫描）、目录与价格表一致性
+- **端到端**（mock 上游）：流式/非流式透传、错误透传、模型别名、`/usage` 统计聚合
+- **线上回归**（`test/live.test.mjs`，需 key）：模型列表、Vibe 表面模型名、工具调用、流式、**自动缓存命中**、billing 双池、插件 usage 钩子读真实数据、客户端指纹防漂移
+
+### CI（GitHub Actions）
+
+`.github/workflows/ci.yml` 两个 job：
+
+- **test**：Node 18/20/22/24 × Ubuntu/Windows/macOS 共 12 个组合跑全量用例 + `npm pack --dry-run` 打包校验。push 到 master/main 和 PR 自动触发
+- **live**：仅手动触发（Actions → CI → Run workflow → 勾选 live），key 从 repository secret `MISTRAL_API_KEY` 注入，**永不进代码**。改完代码后一键验证整条链路（包括 Mistral 侧有没有变动）
+
+配置方法：仓库 Settings → Secrets and variables → Actions → New repository secret，名 `MISTRAL_API_KEY`，值填 Vibe key。
 
 ## 风险与限制
 

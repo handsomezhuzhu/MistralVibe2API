@@ -140,11 +140,13 @@ export function resolveApiKey(clientHeaders, config) {
  * Static model catalog. Names verified against the live endpoints with a Vibe
  * key: `GET /v1/models` and `GET /v1/model-catalog?surface=vibe-code`.
  *
- * The `mistral-vibe-cli-*` entries are the wire names the Vibe CLI itself
- * sends (the harness's LocalModelRoute default is `mistral-vibe-cli-latest`,
- * an alias of mistral-medium-latest). Mistral's Vibe surface serves them, so
- * the proxy offers them first: usage is most likely attributed to the Vibe
- * allowance when the request carries a Vibe-surface model.
+ * This list mirrors the Vibe surface exactly (the six models the catalog
+ * serves, plus the `mistral-vibe-cli-*` wire names the CLI itself sends — the
+ * harness's LocalModelRoute default is `mistral-vibe-cli-latest`, an alias of
+ * mistral-medium-latest). Models outside the Vibe surface (codestral,
+ * ministral, pixtral, …) are deliberately absent: they route on the API
+ * surface and would bill the API allowance. After sign-in the plugin merges
+ * the account's live catalog over this list anyway.
  */
 export const MODELS = {
   "mistral-vibe-cli-latest": {
@@ -182,56 +184,6 @@ export const MODELS = {
     modalities: { input: ["text", "image"] },
     attachment: true,
   },
-  "mistral-large-latest": {
-    name: "Mistral Large 3",
-    limit: { context: 262144, output: 32768 },
-    reasoning: true,
-    tool_call: true,
-  },
-  "mistral-small-latest": {
-    name: "Mistral Small 4",
-    limit: { context: 131072, output: 32768 },
-    tool_call: true,
-  },
-  "codestral-latest": {
-    name: "Codestral",
-    limit: { context: 262144, output: 32768 },
-    tool_call: true,
-  },
-  "magistral-medium-latest": {
-    name: "Magistral Medium",
-    limit: { context: 262144, output: 32768 },
-    reasoning: true,
-    tool_call: true,
-  },
-  "magistral-small-latest": {
-    name: "Magistral Small",
-    limit: { context: 131072, output: 32768 },
-    reasoning: true,
-    tool_call: true,
-  },
-  "ministral-3b-latest": {
-    name: "Ministral 3B",
-    limit: { context: 131072, output: 32768 },
-    tool_call: true,
-  },
-  "ministral-8b-latest": {
-    name: "Ministral 8B",
-    limit: { context: 131072, output: 32768 },
-    tool_call: true,
-  },
-  "ministral-14b-latest": {
-    name: "Ministral 14B",
-    limit: { context: 131072, output: 32768 },
-    tool_call: true,
-  },
-  "pixtral-large-latest": {
-    name: "Pixtral Large",
-    limit: { context: 131072, output: 32768 },
-    tool_call: true,
-    modalities: { input: ["text", "image"] },
-    attachment: true,
-  },
   "zai-glm-5-3": {
     name: "GLM 5.3 (Mistral Hosted)",
     limit: { context: 1048576, output: 32768 },
@@ -240,15 +192,27 @@ export const MODELS = {
   },
   "zai-glm-5-3-flash": {
     name: "GLM 5.3 Flash (Mistral Hosted)",
+    limit: { context: 1048576, output: 32768 },
+    reasoning: true,
+    tool_call: true,
+    modalities: { input: ["text", "image"] },
+    attachment: true,
+  },
+  "zai-glm-5-3-flash-vibe-free": {
+    name: "GLM 5.3 Flash (Vibe Free)",
     limit: { context: 262144, output: 32768 },
     reasoning: true,
     tool_call: true,
+    modalities: { input: ["text", "image"] },
+    attachment: true,
   },
   "deepseek-v4-1-flash-1017": {
     name: "DeepSeek V4.1 Flash (Mistral Hosted)",
     limit: { context: 1048576, output: 32768 },
     reasoning: true,
     tool_call: true,
+    modalities: { input: ["text", "image"] },
+    attachment: true,
   },
 };
 
@@ -418,8 +382,9 @@ export function budgetToWindows(budget) {
 /**
  * USD per million tokens, from mistral.ai/pricing/api (standard tier).
  * The CLI prices a completion with the same numbers (its CompletionPricing);
- * models the Vibe plan includes without a published rate (Medium 3.5) carry
- * no price, so their cost reads as unknown rather than zero.
+ * models the Vibe plan includes without a published rate (Medium 3.5 and its
+ * vibe-cli aliases) carry no price, so their cost reads as unknown rather
+ * than zero.
  */
 export const MODEL_PRICES = {
   "mistral-vibe-cli-latest": null, // Medium 3.5: no published API rate
@@ -427,16 +392,10 @@ export const MODEL_PRICES = {
   "mistral-vibe-cli-fast": null,
   "mistral-medium-latest": null,
   "mistral-large-4-0": { input: 0.7, cachedInput: 0.07, output: 2.1 },
-  "mistral-large-latest": { input: 0.7, cachedInput: 0.07, output: 2.1 },
-  "mistral-small-latest": { input: 0.15, cachedInput: 0.015, output: 0.6 },
-  "codestral-latest": { input: 0.3, cachedInput: 0.03, output: 0.9 },
   "zai-glm-5-3": { input: 1.4, cachedInput: 0.14, output: 4.4 },
   "zai-glm-5-3-flash": { input: 0.15, cachedInput: 0.03, output: 0.5 },
   "zai-glm-5-3-flash-vibe-free": { input: 0.15, cachedInput: 0.03, output: 0.5 },
   "deepseek-v4-1-flash-1017": { input: 0.3, cachedInput: 0.007, output: 1.2 },
-  "ministral-14b-latest": { input: 0.2, cachedInput: 0.02, output: 0.2 },
-  "ministral-8b-latest": { input: 0.15, cachedInput: 0.015, output: 0.15 },
-  "ministral-3b-latest": { input: 0.1, cachedInput: 0.01, output: 0.1 },
 };
 
 /**
