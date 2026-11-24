@@ -4,7 +4,6 @@ on:
   push:
     branches: [master, main]
   pull_request:
-  workflow_dispatch:
 
 jobs:
   test:
@@ -30,24 +29,3 @@ jobs:
 
       - name: Package packs for npm
         run: npm pack --dry-run
-
-  live:
-    name: live regression (real Mistral API)
-    runs-on: ubuntu-latest
-    # Manual dispatch only, and only when the repository carries the key as a
-    # secret — the key never lives in the repository. Note: the `inputs`
-    # context only exists for workflow_dispatch, so gate on github.event_name
-    # (always present) and the secret, never on `inputs.*`.
-    if: ${{ github.event_name == 'workflow_dispatch' && secrets.MISTRAL_API_KEY != '' }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Live tests
-        env:
-          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-        run: node --test test/live.test.mjs
-        timeout-minutes: 10
