@@ -14,6 +14,8 @@
  */
 
 import {
+  budgetToWindows,
+  fetchBilling,
   loadConfig,
   MODELS,
   openAIModelsFromUpstream,
@@ -79,34 +81,52 @@ const MistralVibePlugin = async (_input, options = {}) => {
           },
         };
       },
-      // Mistral exposes no per-key usage endpoint (the admin usage API needs an
-      // Enterprise admin key), so this stays empty unless a usageUrl is
-      // configured. Returning no `used` keeps routing neutral, as documented.
+      // Mistral exposes the plan and both monthly allowances (Vibe Code and
+      // API are separate pools) on the public billing API the CLI itself
+      // reads: /v1/billing/subscription and /v1/billing/budget. /budget needs
+      // the see_org_inference_usage permission; without it we still report
+      // the plan. A usageUrl option overrides all of this.
       async usage(getAuth) {
         const auth = await getAuth();
-        if (auth?.type !== "api" || !opts.usageUrl) return {};
-        try {
-          const response = await fetch(opts.usageUrl, {
-            headers: sanitizeHeaders(null, {
-              apiKey: auth.key,
-              userAgent: opts.userAgent,
-              extraHeaders: opts.extraHeaders,
-            }),
-          });
-          if (!response.ok) {
-            return { error: `usage endpoint answered ${response.status}`, windows: [] };
-          }
-          const data = await response.json();
-          const windows = [];
-          if (data?.used != null && data?.limit != null) {
-            windows.push({
-              name: data.name ?? "monthly",
-              used: Number(data.used),
-              limit: Number(data.limit),
-              unit: data.unit ?? "requests",
+        if (auth?.type !== "api") return {};
+
+        if (opts.usageUrl) {
+          try {
+            const response = await fetch(opts.usageUrl, {
+              headers: sanitizeHeaders(null, {
+                apiKey: auth.key,
+                userAgent: opts.userAgent,
+                extraHeaders: opts.extraHeaders,
+              }),
             });
+            if (!response.ok) {
+              return { error: `usage endpoint answered ${response.status}`, windows: [] };
+            }
+            const data = await response.json();
+            const windows = [];
+            if (data?.used != null && data?.limit != null) {
+              windows.push({
+                name: data.name ?? "monthly",
+                used: Number(data.used),
+                limit: Number(data.limit),
+                unit: data.unit ?? "requests",
+              });
+            }
+            return { plan: data?.plan, user: data?.user, windows };
+          } catch (error) {
+            return { error: String(error?.message ?? error), windows: [] };
           }
-          return { plan: data?.plan, user: data?.user, windows };
+        }
+
+        try {
+          const billing = await fetchBilling(auth.key, opts);
+          const windows = budgetToWindows(billing.budget);
+          const plan = billing.subscription?.plan_name;
+          if (!windows.length) {
+            // 403/404 on /budget (no permission, self-hosted): plan only.
+            return plan ? { plan } : {};
+          }
+          return { plan, windows };
         } catch (error) {
           return { error: String(error?.message ?? error), windows: [] };
         }

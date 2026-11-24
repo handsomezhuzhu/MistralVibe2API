@@ -21,6 +21,35 @@ function startMockUpstream() {
         return;
       }
 
+      if (req.method === "GET" && req.url === "/v1/billing/subscription") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ plan_name: "INDIVIDUAL", vibe_payg_enabled: false }));
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/v1/billing/budget") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            vibe_budget: {
+              usage_percentage: 13.92,
+              initial_budget: 300,
+              currency: "USD",
+              reset_at: "2026-12-01T00:00:00Z",
+              payg_enabled: false,
+            },
+            api_budget: {
+              usage_percentage: 0.92,
+              initial_budget: 30,
+              currency: "USD",
+              reset_at: "2026-12-01T00:00:00Z",
+              payg_enabled: false,
+            },
+          })
+        );
+        return;
+      }
+
       let parsed = {};
       try {
         parsed = JSON.parse(body);
@@ -360,6 +389,66 @@ test("MODEL_MAP rewrites the model before it reaches Mistral", async () => {
       body: JSON.stringify({ model: "fast", messages: [] }),
     });
     assert.equal(JSON.parse(upstream.received[0].body).model, "mistral-small-latest");
+  } finally {
+    proxy.server.close();
+    upstream.server.close();
+  }
+});
+
+test("GET /usage reports local stats plus the live billing read", async () => {
+  const upstream = await startMockUpstream();
+  const proxy = await startProxy(upstream.port);
+
+  try {
+    // one non-streaming completion so stats have something to show
+    const chat = await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "mistral-small-latest", messages: [] }),
+    });
+    assert.equal(chat.status, 200);
+    await readAll(chat);
+
+    const res = await fetch(`http://127.0.0.1:${proxy.port}/usage`, {
+      headers: { authorization: "Bearer anything" },
+    });
+    assert.equal(res.status, 200);
+    const json = await res.json();
+    assert.equal(json.local.total.requests, 1);
+    assert.equal(json.local.total.input_tokens, 9);
+    assert.equal(json.local.total.output_tokens, 4);
+    assert.equal(json.local.total.cost_known, true);
+    assert.ok(json.local.total.cost_usd > 0);
+    assert.ok(json.local.by_model["mistral-small-latest"]);
+    // billing read flows through the same upstream
+    assert.equal(json.billing.subscription.plan_name, "INDIVIDUAL");
+    assert.equal(json.billing.budget.vibe_budget.initial_budget, 300);
+  } finally {
+    proxy.server.close();
+    upstream.server.close();
+  }
+});
+
+test("streaming completions count usage from the final chunk", async () => {
+  const upstream = await startMockUpstream();
+  const proxy = await startProxy(upstream.port);
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "mistral-small-latest",
+        stream: true,
+        messages: [],
+      }),
+    });
+    await readAll(res);
+    const usage = await (await fetch(`http://127.0.0.1:${proxy.port}/usage`)).json();
+    assert.equal(usage.local.total.requests, 1);
+    assert.equal(usage.local.total.input_tokens, 9);
+    assert.equal(usage.local.total.cached_input_tokens, 0);
+    assert.equal(usage.local.total.cache_hit_rate, 0);
   } finally {
     proxy.server.close();
     upstream.server.close();

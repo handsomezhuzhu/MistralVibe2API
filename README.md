@@ -108,6 +108,65 @@ Accept: text/event-stream        # 流式时
 - 三种组合（Vibe UA + vibe-cli 模型 / Claude UA + vibe-cli 模型 / 无 UA + 通用模型）都返回 200，限流头一致（1M tokens/min、2000 req/min，即 Vibe 套餐级限额，跟着 key 走）；
 - `console.mistral.ai/api/vibe/whoami` 用该 key 可查（返回 `plan_type`、`api_base`、`vibe_base`）；其余用量端点（`/api/vibe/usage` 等）是 dashboard 会话鉴权，API key 拿不到——所以插件的 usage 钩子默认不查；
 - 代理全链路（OpenAI 流式、Anthropic `/v1/messages`、`mistral-vibe-cli-latest` 模型）实测通过。
+- **计量归属已实锤**：经代理发请求后，`/v1/billing/budget` 里 `vibe_budget` 的百分比上涨幅度与本地按 CLI 公式算出的成本**分毫不差**（$0.000954），`api_budget` 一动不动——代理流量全部计入 Vibe 额度。
+
+---
+
+## 用量、缓存命中与消耗：能拿到什么
+
+Mistral 的计费用量分三个层次，全部实测可用（Vibe key 即可，无需 Enterprise）：
+
+### 1. 每请求的缓存命中与 token 明细（无需额外端点）
+
+每次 chat completion 响应的 `usage` 里就有，流式的最后一个 chunk 同样带：
+
+```json
+"usage": {
+  "prompt_tokens": 3012, "completion_tokens": 4, "total_tokens": 3016,
+  "prompt_tokens_details": { "cached_tokens": 2944, "cache_write_tokens": 0 },
+  "completion_tokens_details": { "reasoning_tokens": 0 },
+  "service_tier": "standard"
+}
+```
+
+- `prompt_tokens_details.cached_tokens`——**缓存命中**的输入 token（Mistral 自动缓存，重复 prompt 第二次即命中，实测命中率 97.7%）
+- `prompt_tokens_details.cache_write_tokens`——写入缓存的 token
+- `completion_tokens_details.reasoning_tokens`——推理 token
+
+CLI 自己的记账读的就是这几个字段（harness `adapters/_reply_usage.py` 的 `RustTokenUsage`）。代理的 Anthropic 转换会把它们映射成 Claude Code 认得的 `cache_read_input_tokens` / `cache_creation_input_tokens`。
+
+### 2. 账号级余额与消耗（Vibe key 直接可查）
+
+CLI 自己的账号读取（`vibe/app_server/_billing.py`）用这两个公开端点：
+
+```bash
+curl -H "Authorization: Bearer $VIBE_KEY" https://api.mistral.ai/v1/billing/subscription
+# {"plan_name":"INDIVIDUAL","payg_enabled":false,"vibe_payg_enabled":false,"enterprise":false}
+
+curl -H "Authorization: Bearer $VIBE_KEY" https://api.mistral.ai/v1/billing/budget
+# {"vibe_budget":{"usage_percentage":13.92,"initial_budget":300.0,"currency":"USD",
+#                 "reset_at":"2026-12-01T00:00:00Z","payg_enabled":false},
+#  "api_budget":{"usage_percentage":0.92,"initial_budget":30.0,...}}
+```
+
+- **Vibe 额度**（`vibe_budget`）和 **API 额度**（`api_budget`）是两个独立的池，每月 1 日 UTC 重置——双池结构在此实锤
+- `/budget` 需要 key 带 `see_org_inference_usage` 权限；没有该权限的成员会拿到 403，属正常
+- 另有 `console.mistral.ai/api/vibe/account-context`（组织/工作区/付费 entitlement）和 `/api/vibe/whoami`
+
+### 3. 本地成本核算（CLI 同款公式）
+
+插件和独立反代按 CLI 的公式（harness `_completion_budget.py` 的 `CompletionPricing.cost`）用官方定价（mistral.ai/pricing/api）计算每次请求的成本：
+
+```
+cost = (未命中输入 × 输入价 + 命中输入 × 缓存价 + 输出 × 输出价) / 1,000,000
+```
+
+实测该公式算出的 $0.000954 与 billing 端点的实际扣减完全一致。没有公开标价的模型（Medium 3.5 等 Vibe 套餐内模型）不计价，`cost_known` 标记为 false 而不是当 0。
+
+**用法**：
+
+- magpie 插件：`auth.usage` 钩子自动把 `/v1/billing/budget` 渲染成账号卡片上的两条额度窗口（`magpie quota` 可见）
+- 独立反代：`GET /usage` 一次性返回本地累计统计（按模型分组的请求数、输入/输出/命中/推理 token、成本、缓存命中率）+ 实时 billing 读取
 
 ---
 
@@ -162,6 +221,7 @@ MISTRAL_API_KEY=你的Vibekey node src/server.mjs
 | `POST /v1/messages` | Anthropic 兼容（Claude Code 用），自动转成 chat completions 再转回 Anthropic SSE |
 | `POST /v1/messages/count_tokens` | 本地估算，不打扰上游 |
 | `GET /v1/models` | 透传上游列表，失败时回退静态目录 |
+| `GET /usage` | 本地累计统计（按模型：请求数、token、缓存命中、推理 token、成本）+ 实时 billing（额度/套餐） |
 | `GET /health` | 健康检查 |
 
 环境变量：
@@ -202,7 +262,7 @@ export OPENAI_API_KEY=任意占位符
 ## 测试
 
 ```bash
-node --test        # 44 个用例：头改写、Anthropic 转换、SSE 编解码、端到端（mock 上游）
+node --test        # 63 个用例：头改写、Anthropic 转换、SSE 编解码、计费/成本、端到端（mock 上游）
 ```
 
 覆盖的关键行为：
@@ -222,9 +282,9 @@ node --test        # 44 个用例：头改写、Anthropic 转换、SSE 编解码
 ## 开发
 
 ```
-index.mjs          magpie/OpenCode 插件入口（provider + auth + loader fetch）
-src/core.mjs       上游指纹逻辑（头改写、key 解析、模型目录、配置）
-src/anthropic.mjs  Anthropic ⇄ OpenAI 协议转换 + SSE 编解码
-src/server.mjs     独立反代服务器
+index.mjs          magpie/OpenCode 插件入口（provider + auth + loader fetch + usage）
+src/core.mjs       上游指纹逻辑（头改写、key 解析、模型目录、价格表、计费查询、用量累计）
+src/anthropic.mjs  Anthropic ⇄ OpenAI 协议转换 + SSE 编解码（含缓存字段映射）
+src/server.mjs     独立反代服务器（/v1/chat/completions、/v1/messages、/usage）
 test/              node:test 用例
 ```

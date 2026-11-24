@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import { test } from "node:test";
 
 import {
@@ -186,4 +187,146 @@ test("loadConfig reads env with sane defaults", () => {
 
 test("UPSTREAM_BASE points at the official Vibe endpoint", () => {
   assert.equal(UPSTREAM_BASE, "https://api.mistral.ai/v1");
+});
+
+/* ------------------------- billing & cost ------------------------- */
+
+test("computeCost follows the Vibe CLI's own formula", async () => {
+  const { computeCost } = await import("../src/core.mjs");
+  const price = { input: 0.3, cachedInput: 0.007, output: 1.2 }; // DeepSeek V4.1 Flash
+  // 1M uncached input, 500k cached input, 100k output
+  const cost = computeCost(
+    {
+      prompt_tokens: 1_500_000,
+      completion_tokens: 100_000,
+      prompt_tokens_details: { cached_tokens: 500_000 },
+    },
+    price
+  );
+  // (1_000_000 * 0.3 + 500_000 * 0.007 + 100_000 * 1.2) / 1e6
+  assert.equal(cost, (1_000_000 * 0.3 + 500_000 * 0.007 + 100_000 * 1.2) / 1e6);
+});
+
+test("computeCost returns null for models without a published rate", async () => {
+  const { computeCost, MODEL_PRICES } = await import("../src/core.mjs");
+  assert.equal(computeCost({ prompt_tokens: 10 }, MODEL_PRICES["mistral-medium-latest"]), null);
+  assert.equal(MODEL_PRICES["deepseek-v4-1-flash-1017"].input, 0.3);
+});
+
+test("accumulateUsage folds usage and tracks cost availability", async () => {
+  const { accumulateUsage, emptyUsageRecord } = await import("../src/core.mjs");
+  let record = emptyUsageRecord();
+  record = accumulateUsage(
+    record,
+    {
+      prompt_tokens: 100,
+      completion_tokens: 20,
+      prompt_tokens_details: { cached_tokens: 60, cache_write_tokens: 40 },
+      completion_tokens_details: { reasoning_tokens: 5 },
+    },
+    { input: 0.3, cachedInput: 0.007, output: 1.2 }
+  );
+  assert.equal(record.requests, 1);
+  assert.equal(record.input_tokens, 100);
+  assert.equal(record.cached_input_tokens, 60);
+  assert.equal(record.cache_write_tokens, 40);
+  assert.equal(record.reasoning_tokens, 5);
+  assert.equal(record.cost_known, true);
+  assert.ok(record.cost_usd > 0);
+
+  record = accumulateUsage(record, { prompt_tokens: 1 }, null);
+  assert.equal(record.requests, 2);
+  assert.equal(record.cost_known, false);
+});
+
+test("extractUsage reads the final chunk of an SSE buffer", async () => {
+  const { extractUsage } = await import("../src/core.mjs");
+  const sse =
+    'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n' +
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":4}}}\n\n' +
+    "data: [DONE]\n\n";
+  const found = extractUsage(Buffer.from(sse));
+  assert.equal(found.usage.prompt_tokens, 10);
+  assert.equal(found.usage.prompt_tokens_details.cached_tokens, 4);
+  assert.equal(extractUsage(Buffer.from("data: [DONE]\n\n")), null);
+});
+
+test("extractUsage reads a non-streaming JSON body", async () => {
+  const { extractUsage } = await import("../src/core.mjs");
+  const found = extractUsage(
+    JSON.stringify({ model: "m", usage: { prompt_tokens: 7, completion_tokens: 1 } })
+  );
+  assert.equal(found.usage.prompt_tokens, 7);
+  assert.equal(found.model, "m");
+});
+
+test("budgetToWindows maps both pools from the live response shape", async () => {
+  const { budgetToWindows } = await import("../src/core.mjs");
+  const windows = budgetToWindows({
+    vibe_budget: {
+      usage_percentage: 13.916714140666667,
+      initial_budget: 300.0,
+      currency: "USD",
+      reset_at: "2026-12-01T00:00:00Z",
+      payg_enabled: false,
+    },
+    api_budget: {
+      usage_percentage: 0.9228938266666666,
+      initial_budget: 30.0,
+      currency: "USD",
+      reset_at: "2026-12-01T00:00:00Z",
+      payg_enabled: false,
+    },
+  });
+  assert.equal(windows.length, 2);
+  const [vibe, api] = windows;
+  assert.equal(vibe.name, "Vibe Code");
+  assert.equal(vibe.limit, 300);
+  assert.equal(vibe.amount, 41.75);
+  assert.equal(vibe.unit, "USD");
+  assert.equal(vibe.resetsAt, "2026-12-01T00:00:00Z");
+  assert.ok(vibe.span > 0);
+  assert.equal(api.name, "API");
+  assert.equal(api.limit, 30);
+  assert.equal(api.amount, 0.28);
+});
+
+test("fetchBilling reads both endpoints and tolerates failures", async () => {
+  const { fetchBilling } = await import("../src/core.mjs");
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      if (req.url === "/v1/billing/subscription") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ plan_name: "INDIVIDUAL", vibe_payg_enabled: false }));
+        return;
+      }
+      if (req.url === "/v1/billing/budget") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            vibe_budget: { usage_percentage: 5, initial_budget: 300, currency: "USD" },
+          })
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+  });
+  await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+
+  try {
+    const billing = await fetchBilling("k", {
+      upstreamBase: `http://127.0.0.1:${upstream.address().port}/v1`,
+    });
+    assert.equal(billing.subscription.plan_name, "INDIVIDUAL");
+    assert.equal(billing.budget.vibe_budget.initial_budget, 300);
+
+    // a dead upstream degrades to nulls instead of throwing
+    const dead = await fetchBilling("k", { upstreamBase: "http://127.0.0.1:1/v1" });
+    assert.deepEqual(dead, { subscription: null, budget: null });
+  } finally {
+    upstream.close();
+  }
 });

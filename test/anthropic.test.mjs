@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import http from "node:http";
 import { Readable } from "node:stream";
 
 import {
@@ -7,6 +8,7 @@ import {
   anthropicRequestToOpenAI,
   estimateTokens,
   openAIResponseToAnthropic,
+  openAIUsageToAnthropic,
   parseSSE,
   sseEvent,
   splitDeltaContent,
@@ -328,4 +330,53 @@ test("estimateTokens counts roughly", () => {
     messages: [{ role: "user", content: "b".repeat(400) }],
   });
   assert.ok(tokens > 150 && tokens < 250, `got ${tokens}`);
+});
+
+test("openAIUsageToAnthropic maps cache hits and cache writes", () => {
+  const usage = openAIUsageToAnthropic({
+    prompt_tokens: 100,
+    completion_tokens: 20,
+    prompt_tokens_details: { cached_tokens: 60, cache_write_tokens: 30 },
+    completion_tokens_details: { reasoning_tokens: 5 },
+  });
+  assert.deepEqual(usage, {
+    input_tokens: 100,
+    output_tokens: 20,
+    cache_read_input_tokens: 60,
+    cache_creation_input_tokens: 30,
+  });
+});
+
+test("openAIResponseToAnthropic carries the cache fields", () => {
+  const message = openAIResponseToAnthropic({
+    id: "c1",
+    model: "m",
+    choices: [{ finish_reason: "stop", message: { content: "hi" } }],
+    usage: {
+      prompt_tokens: 100,
+      completion_tokens: 20,
+      prompt_tokens_details: { cached_tokens: 60, cache_write_tokens: 30 },
+    },
+  });
+  assert.equal(message.usage.cache_read_input_tokens, 60);
+  assert.equal(message.usage.cache_creation_input_tokens, 30);
+});
+
+test("AnthropicSSEEncoder reports cache fields in usage events", () => {
+  const encoder = new AnthropicSSEEncoder("m");
+  const events = [
+    ...encoder.push({ choices: [{ index: 0, delta: { content: "hi" }, finish_reason: null }] }),
+    ...encoder.push({
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        prompt_tokens_details: { cached_tokens: 60, cache_write_tokens: 30 },
+      },
+    }),
+    ...encoder.end(),
+  ];
+  const messageDelta = events.find((e) => e.type === "message_delta");
+  assert.equal(messageDelta.usage.cache_read_input_tokens, 60);
+  assert.equal(messageDelta.usage.cache_creation_input_tokens, 30);
 });

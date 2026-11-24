@@ -17,7 +17,7 @@
  */
 
 import http from "node:http";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,14 +30,66 @@ import {
   sseEvent,
 } from "./anthropic.mjs";
 import {
+  accumulateUsage,
+  emptyUsageRecord,
+  extractUsage,
+  fetchBilling,
   loadConfig,
   mapModel,
+  MODEL_PRICES,
   MODELS,
   resolveApiKey,
   sanitizeHeaders,
 } from "./core.mjs";
 
 const MAX_BODY_BYTES = 64 * 1024 * 1024;
+/** How much of a streamed reply to keep for the trailing usage object. */
+const USAGE_TAIL_BYTES = 32 * 1024;
+
+/** Per-server usage accounting: totals plus a record per model. */
+function createStats() {
+  const byModel = new Map();
+  const total = emptyUsageRecord();
+  const stats = {
+    since: new Date().toISOString(),
+    byModel,
+    total,
+    /** Fold one completion's usage (usage already carries the wire model). */
+    record(model, usage) {
+      const key = model ?? "unknown";
+      const previous = byModel.get(key) ?? emptyUsageRecord();
+      const next = accumulateUsage(previous, usage, MODEL_PRICES[key]);
+      byModel.set(key, next);
+
+      const delta = emptyUsageRecord();
+      for (const field of Object.keys(delta)) {
+        delta[field] = next[field] - previous[field];
+      }
+      total.requests += delta.requests;
+      total.input_tokens += delta.input_tokens;
+      total.output_tokens += delta.output_tokens;
+      total.cached_input_tokens += delta.cached_input_tokens;
+      total.cache_write_tokens += delta.cache_write_tokens;
+      total.reasoning_tokens += delta.reasoning_tokens;
+      // the total sums the per-model costs; cost_known flags models whose
+      // price Mistral does not publish (their cost is not counted)
+      total.cost_usd =
+        Math.round((total.cost_usd + delta.cost_usd) * 1e9) / 1e9;
+      if (!next.cost_known) total.cost_known = false;
+    },
+    snapshot() {
+      const models = {};
+      for (const [model, record] of byModel) models[model] = { ...record };
+      const totalSnap = { ...total };
+      totalSnap.cache_hit_rate =
+        total.input_tokens > 0
+          ? Math.round((total.cached_input_tokens / total.input_tokens) * 10000) / 10000
+          : null;
+      return { since: stats.since, total: totalSnap, by_model: models };
+    },
+  };
+  return stats;
+}
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -75,7 +127,7 @@ function sendAnthropicError(res, status, type, message) {
 }
 
 /** Stream the upstream response back untouched (SSE stays SSE). */
-function pipeUpstream(res, upstream) {
+function pipeUpstream(res, upstream, stats, wireModel) {
   res.writeHead(upstream.status, {
     "content-type": upstream.headers.get("content-type") ?? "application/json",
     "cache-control": "no-cache",
@@ -85,7 +137,24 @@ function pipeUpstream(res, upstream) {
     res.end();
     return;
   }
-  const stream = Readable.fromWeb(upstream.body);
+
+  let tail = Buffer.alloc(0);
+  const tap = new Transform({
+    transform(chunk, _enc, cb) {
+      this.push(chunk);
+      tail = Buffer.concat([tail, chunk]).slice(-USAGE_TAIL_BYTES);
+      cb();
+    },
+    flush(cb) {
+      if (stats) {
+        const found = extractUsage(tail);
+        if (found) stats.record(wireModel ?? found.model, found.usage);
+      }
+      cb();
+    },
+  });
+
+  const stream = Readable.fromWeb(upstream.body).pipe(tap);
   stream.on("error", () => res.destroy());
   stream.pipe(res);
   res.on("close", () => {
@@ -134,7 +203,7 @@ async function handleModels(req, res, config) {
   }
 }
 
-async function handleChatCompletions(req, res, config) {
+async function handleChatCompletions(req, res, config, stats) {
   const apiKey = resolveApiKey(req.headers, config);
   if (!apiKey) return sendOpenAIError(res, 401, "missing API key: set MISTRAL_API_KEY or send Authorization");
 
@@ -153,10 +222,26 @@ async function handleChatCompletions(req, res, config) {
     }),
     body: payload,
   });
-  return pipeUpstream(res, upstream);
+
+  if (!upstream.ok || !body.stream) {
+    // Non-streaming (or an error): buffer so the usage can be counted, then
+    // send it on verbatim.
+    const text = await upstream.text().catch(() => "");
+    if (stats && upstream.ok) {
+      const found = extractUsage(text);
+      if (found) stats.record(body.model, found.usage);
+    }
+    res.writeHead(upstream.status, {
+      "content-type": upstream.headers.get("content-type") ?? "application/json",
+      "cache-control": "no-cache",
+    });
+    return res.end(text);
+  }
+
+  return pipeUpstream(res, upstream, stats, body.model);
 }
 
-async function handleAnthropicMessages(req, res, config) {
+async function handleAnthropicMessages(req, res, config, stats) {
   const apiKey = resolveApiKey(req.headers, config);
   if (!apiKey) {
     return sendAnthropicError(res, 401, "authentication_error", "missing API key: set MISTRAL_API_KEY");
@@ -192,6 +277,7 @@ async function handleAnthropicMessages(req, res, config) {
 
   if (!openAI.stream) {
     const json = await upstream.json().catch(() => ({}));
+    if (stats && json?.usage) stats.record(openAI.model, json.usage);
     return sendJson(res, 200, openAIResponseToAnthropic(json, body.model));
   }
 
@@ -206,6 +292,7 @@ async function handleAnthropicMessages(req, res, config) {
   try {
     for await (const event of parseSSE(Readable.fromWeb(upstream.body))) {
       if (event.done) break;
+      if (stats && event.data?.usage) stats.record(openAI.model, event.data.usage);
       for (const out of encoder.push(event.data)) res.write(sseEvent(out));
     }
     for (const out of encoder.end()) res.write(sseEvent(out));
@@ -224,6 +311,20 @@ async function handleAnthropicMessages(req, res, config) {
   });
 }
 
+/** GET /usage: this server's accounting plus the live billing read. */
+async function handleUsage(req, res, config, stats) {
+  const apiKey = resolveApiKey(req.headers, config);
+  const out = { local: stats.snapshot(), billing: null };
+  if (apiKey) {
+    try {
+      out.billing = await fetchBilling(apiKey, config);
+    } catch (error) {
+      out.billing = { error: String(error?.message ?? error) };
+    }
+  }
+  sendJson(res, 200, out);
+}
+
 function handleCountTokens(req, res, body) {
   sendJson(res, 200, { input_tokens: estimateTokens(body) });
 }
@@ -231,6 +332,7 @@ function handleCountTokens(req, res, body) {
 /* ------------------------------ server ---------------------------- */
 
 export function createProxyServer(config) {
+  const stats = createStats();
   const server = http.createServer(async (req, res) => {
     const started = Date.now();
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -250,19 +352,29 @@ export function createProxyServer(config) {
           ok: true,
           service: "mistral-vibe-2api",
           upstream: config.upstreamBase,
-          routes: ["/v1/models", "/v1/chat/completions", "/v1/messages", "/v1/messages/count_tokens"],
+          routes: [
+            "/v1/models",
+            "/v1/chat/completions",
+            "/v1/messages",
+            "/v1/messages/count_tokens",
+            "/usage",
+          ],
         });
       }
       if (req.method === "GET" && path === "/v1/models") {
         await handleModels(req, res, config);
         return log(res.statusCode);
       }
+      if (req.method === "GET" && path === "/usage") {
+        await handleUsage(req, res, config, stats);
+        return log(res.statusCode);
+      }
       if (req.method === "POST" && path === "/v1/chat/completions") {
-        await handleChatCompletions(req, res, config);
+        await handleChatCompletions(req, res, config, stats);
         return log(res.statusCode);
       }
       if (req.method === "POST" && path === "/v1/messages") {
-        await handleAnthropicMessages(req, res, config);
+        await handleAnthropicMessages(req, res, config, stats);
         return log(res.statusCode);
       }
       if (req.method === "POST" && path === "/v1/messages/count_tokens") {

@@ -335,3 +335,203 @@ export function mapModel(model, modelMap) {
   if (!modelMap || typeof model !== "string") return model;
   return modelMap[model] ?? model;
 }
+
+/* ------------------------------------------------------------------ */
+/* Billing: what the Vibe CLI's own account read uses                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Read the plan and the monthly budgets from Mistral's public billing API.
+ * This is what the CLI itself calls (vibe/app_server/_billing.py):
+ *
+ *   GET {api_base}/billing/subscription  -> { plan_name, vibe_payg_enabled, ... }
+ *   GET {api_base}/billing/budget        -> { vibe_budget, api_budget, ... }
+ *
+ * Both accept the Vibe API key as the platform credential. /budget needs the
+ * see_org_inference_usage permission on the key; a 403 there is normal for
+ * members without it, so failures degrade to null instead of throwing.
+ */
+export async function fetchBilling(apiKey, opts = {}) {
+  const base = (opts.upstreamBase ?? UPSTREAM_BASE).replace(/\/+$/, "");
+  const headers = sanitizeHeaders(null, {
+    apiKey,
+    userAgent: opts.userAgent,
+    extraHeaders: opts.extraHeaders,
+  });
+  const out = { subscription: null, budget: null };
+  const [subRes, budRes] = await Promise.allSettled([
+    fetch(`${base}/billing/subscription`, { headers }),
+    fetch(`${base}/billing/budget`, { headers }),
+  ]);
+  if (subRes.status === "fulfilled" && subRes.value.ok) {
+    out.subscription = await subRes.value.json().catch(() => null);
+  }
+  if (budRes.status === "fulfilled" && budRes.value.ok) {
+    out.budget = await budRes.value.json().catch(() => null);
+  }
+  return out;
+}
+
+/** Seconds from now until an ISO reset time, or undefined when unparseable. */
+function resetSpan(resetAt) {
+  if (typeof resetAt !== "string") return undefined;
+  const ms = Date.parse(resetAt) - Date.now();
+  return ms > 0 ? Math.round(ms / 1000) : undefined;
+}
+
+function money(amount, currency) {
+  const symbol = currency === "USD" ? "$" : "";
+  return `${symbol}${amount.toFixed(2)}`;
+}
+
+/**
+ * Turn a /billing/budget response into magpie usage windows: the Vibe Code
+ * allowance and the API allowance are separate pools (confirmed live: $300
+ * and $30 per month, both resetting on the 1st UTC).
+ */
+export function budgetToWindows(budget) {
+  const windows = [];
+  for (const [key, name] of [
+    ["vibe_budget", "Vibe Code"],
+    ["api_budget", "API"],
+  ]) {
+    const pool = budget?.[key];
+    if (!pool || typeof pool.usage_percentage !== "number") continue;
+    const limit = Number(pool.initial_budget) || 0;
+    const used = Number(pool.usage_percentage);
+    const amount = Math.round(((limit * used) / 100) * 100) / 100;
+    windows.push({
+      name,
+      used,
+      limit,
+      amount,
+      unit: pool.currency ?? "USD",
+      resetsAt: pool.reset_at ?? undefined,
+      span: resetSpan(pool.reset_at),
+      display: `${money(amount, pool.currency)} / ${money(limit, pool.currency)}`,
+      payg_enabled: pool.payg_enabled ?? undefined,
+    });
+  }
+  return windows;
+}
+
+/**
+ * USD per million tokens, from mistral.ai/pricing/api (standard tier).
+ * The CLI prices a completion with the same numbers (its CompletionPricing);
+ * models the Vibe plan includes without a published rate (Medium 3.5) carry
+ * no price, so their cost reads as unknown rather than zero.
+ */
+export const MODEL_PRICES = {
+  "mistral-vibe-cli-latest": null, // Medium 3.5: no published API rate
+  "mistral-vibe-cli-with-tools": null,
+  "mistral-vibe-cli-fast": null,
+  "mistral-medium-latest": null,
+  "mistral-large-4-0": { input: 0.7, cachedInput: 0.07, output: 2.1 },
+  "mistral-large-latest": { input: 0.7, cachedInput: 0.07, output: 2.1 },
+  "mistral-small-latest": { input: 0.15, cachedInput: 0.015, output: 0.6 },
+  "codestral-latest": { input: 0.3, cachedInput: 0.03, output: 0.9 },
+  "zai-glm-5-3": { input: 1.4, cachedInput: 0.14, output: 4.4 },
+  "zai-glm-5-3-flash": { input: 0.15, cachedInput: 0.03, output: 0.5 },
+  "zai-glm-5-3-flash-vibe-free": { input: 0.15, cachedInput: 0.03, output: 0.5 },
+  "deepseek-v4-1-flash-1017": { input: 0.3, cachedInput: 0.007, output: 1.2 },
+  "ministral-14b-latest": { input: 0.2, cachedInput: 0.02, output: 0.2 },
+  "ministral-8b-latest": { input: 0.15, cachedInput: 0.015, output: 0.15 },
+  "ministral-3b-latest": { input: 0.1, cachedInput: 0.01, output: 0.1 },
+};
+
+/**
+ * Cost of one completion in USD, with the Vibe CLI's own formula
+ * (harness _completion_budget.py, CompletionPricing.cost): uncached input at
+ * the input rate, cached input at the cached rate, output at the output rate.
+ * Returns null when the model has no published price.
+ */
+export function computeCost(usage, price) {
+  if (!price) return null;
+  const input = usage?.prompt_tokens ?? 0;
+  const output = usage?.completion_tokens ?? 0;
+  const cached = Math.min(input, usage?.prompt_tokens_details?.cached_tokens ?? 0);
+  const cachedRate = price.cachedInput ?? price.input;
+  return (
+    ((input - cached) * price.input + cached * cachedRate + output * price.output) /
+    1_000_000
+  );
+}
+
+/** Empty per-model usage record for the stats aggregator. */
+export function emptyUsageRecord() {
+  return {
+    requests: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cached_input_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+    cost_usd: 0,
+    cost_known: true,
+  };
+}
+
+/**
+ * Pull the last `{ model, usage }` out of an SSE buffer (or a non-streaming
+ * JSON body). Mistral reports usage on the final chunk, so the last object
+ * carrying a usage field wins. Returns null when the buffer holds none.
+ */
+export function extractUsage(buffer) {
+  if (!buffer) return null;
+  const text = typeof buffer === "string" ? buffer : buffer.toString("utf8");
+  let found = null;
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) continue;
+    const payload = trimmed.slice(5).trim();
+    if (!payload.startsWith("{")) continue;
+    try {
+      const chunk = JSON.parse(payload);
+      if (chunk?.usage && typeof chunk.usage === "object") {
+        found = { model: chunk.model, usage: chunk.usage };
+      }
+    } catch {
+      // partial or keep-alive line
+    }
+  }
+  if (found) return found;
+  // non-streaming body: the whole text is one JSON object
+  try {
+    const whole = JSON.parse(text);
+    if (whole?.usage && typeof whole.usage === "object") {
+      return { model: whole.model, usage: whole.usage };
+    }
+  } catch {
+    // not a complete JSON body
+  }
+  return null;
+}
+
+/**
+ * Fold one response's usage into a record. `cached_input_tokens` is the cache
+ * hit count Mistral reports in prompt_tokens_details; `cache_write_tokens`
+ * the cache writes; both optional like in the CLI's RustTokenUsage.
+ */
+export function accumulateUsage(record, usage, price) {
+  const next = {
+    requests: record.requests + 1,
+    input_tokens: record.input_tokens + (usage?.prompt_tokens ?? 0),
+    output_tokens: record.output_tokens + (usage?.completion_tokens ?? 0),
+    cached_input_tokens:
+      record.cached_input_tokens + (usage?.prompt_tokens_details?.cached_tokens ?? 0),
+    cache_write_tokens:
+      record.cache_write_tokens + (usage?.prompt_tokens_details?.cache_write_tokens ?? 0),
+    reasoning_tokens:
+      record.reasoning_tokens +
+      (usage?.completion_tokens_details?.reasoning_tokens ?? 0),
+    cost_usd: record.cost_usd,
+    cost_known: record.cost_known,
+  };
+  const cost = computeCost(usage, price);
+  if (cost == null) {
+    next.cost_known = false;
+  } else {
+    next.cost_usd = Math.round((record.cost_usd + cost) * 1e6) / 1e6;
+  }
+  return next;
+}

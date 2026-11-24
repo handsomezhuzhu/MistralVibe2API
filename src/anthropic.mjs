@@ -185,6 +185,25 @@ export function splitDeltaContent(content) {
   return { text, thinking };
 }
 
+/**
+ * Map an OpenAI usage object onto Anthropic's, including the cache fields:
+ * Mistral reports cached prompt tokens and cache writes in
+ * prompt_tokens_details, which Anthropic clients read as
+ * cache_read_input_tokens / cache_creation_input_tokens.
+ */
+export function openAIUsageToAnthropic(usage) {
+  const details = usage?.prompt_tokens_details ?? {};
+  const out = {
+    input_tokens: usage?.prompt_tokens ?? 0,
+    output_tokens: usage?.completion_tokens ?? 0,
+  };
+  if (details.cached_tokens != null) out.cache_read_input_tokens = details.cached_tokens;
+  if (details.cache_write_tokens != null) {
+    out.cache_creation_input_tokens = details.cache_write_tokens;
+  }
+  return out;
+}
+
 /** Convert a non-streaming OpenAI chat completion into an Anthropic message. */
 export function openAIResponseToAnthropic(response, model) {
   const choice = response?.choices?.[0] ?? {};
@@ -217,10 +236,7 @@ export function openAIResponseToAnthropic(response, model) {
     model: model ?? response?.model ?? "unknown",
     stop_reason: mapStopReason(choice.finish_reason),
     stop_sequence: null,
-    usage: {
-      input_tokens: response?.usage?.prompt_tokens ?? 0,
-      output_tokens: response?.usage?.completion_tokens ?? 0,
-    },
+    usage: openAIUsageToAnthropic(response?.usage),
   };
 }
 
@@ -254,6 +270,17 @@ export class AnthropicSSEEncoder {
     this.toolBlocks = new Map(); // openai tool_calls index -> anthropic block
     this.stopReason = null;
     this.usage = { input_tokens: 0, output_tokens: 0 };
+    this.cacheRead = null;
+    this.cacheWrite = null;
+  }
+
+  /** Anthropic usage object, with the cache fields Mistral reports. */
+  _usageObject(withOutput = true) {
+    const usage = { input_tokens: this.usage.input_tokens };
+    if (withOutput) usage.output_tokens = this.usage.output_tokens;
+    if (this.cacheRead != null) usage.cache_read_input_tokens = this.cacheRead;
+    if (this.cacheWrite != null) usage.cache_creation_input_tokens = this.cacheWrite;
+    return usage;
   }
 
   _ensureStarted() {
@@ -269,7 +296,7 @@ export class AnthropicSSEEncoder {
         model: this.model,
         stop_reason: null,
         stop_sequence: null,
-        usage: { input_tokens: this.usage.input_tokens, output_tokens: 0 },
+        usage: this._usageObject(false),
       },
     };
   }
@@ -314,12 +341,17 @@ export class AnthropicSSEEncoder {
       if (chunk.usage.completion_tokens != null) {
         this.usage.output_tokens = chunk.usage.completion_tokens;
       }
+      const details = chunk.usage.prompt_tokens_details;
+      if (details && typeof details === "object") {
+        if (details.cached_tokens != null) this.cacheRead = details.cached_tokens;
+        if (details.cache_write_tokens != null) this.cacheWrite = details.cache_write_tokens;
+      }
       if (this.finished) {
         // usage arrived after the finish chunk: let the client see it
         events.push({
           type: "message_delta",
           delta: { stop_reason: this.stopReason ?? "end_turn", stop_sequence: null },
-          usage: { ...this.usage },
+          usage: this._usageObject(),
         });
       }
     }
@@ -392,7 +424,7 @@ export class AnthropicSSEEncoder {
       events.push({
         type: "message_delta",
         delta: { stop_reason: this.stopReason, stop_sequence: null },
-        usage: { ...this.usage },
+        usage: this._usageObject(),
       });
       events.push({ type: "message_stop" });
     }
@@ -410,7 +442,7 @@ export class AnthropicSSEEncoder {
       events.push({
         type: "message_delta",
         delta: { stop_reason: this.stopReason ?? "end_turn", stop_sequence: null },
-        usage: { ...this.usage },
+        usage: this._usageObject(),
       });
       events.push({ type: "message_stop" });
       this.finished = true;

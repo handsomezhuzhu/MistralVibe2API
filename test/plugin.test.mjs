@@ -103,6 +103,98 @@ test("usage hook stays empty without a usageUrl", async () => {
   assert.deepEqual(usage, {});
 });
 
+test("usage hook reads the billing API and reports both pools", async () => {
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      if (req.url === "/v1/billing/subscription") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ plan_name: "INDIVIDUAL", vibe_payg_enabled: false }));
+        return;
+      }
+      if (req.url === "/v1/billing/budget") {
+        assert.equal(req.headers["user-agent"], VIBE_SDK_USER_AGENT);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            vibe_budget: {
+              usage_percentage: 13.92,
+              initial_budget: 300,
+              currency: "USD",
+              reset_at: "2026-12-01T00:00:00Z",
+              payg_enabled: false,
+            },
+            api_budget: {
+              usage_percentage: 0.92,
+              initial_budget: 30,
+              currency: "USD",
+              reset_at: "2026-12-01T00:00:00Z",
+              payg_enabled: false,
+            },
+          })
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+  });
+  await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+
+  try {
+    const hooks = await plugin.server({ client: mockClient }, {
+      upstreamBase: `http://127.0.0.1:${upstream.address().port}/v1`,
+    });
+    const usage = await hooks.auth.usage(async () => ({ type: "api", key: "k" }));
+    assert.equal(usage.plan, "INDIVIDUAL");
+    assert.equal(usage.windows.length, 2);
+    const [vibe, api] = usage.windows;
+    assert.equal(vibe.name, "Vibe Code");
+    assert.equal(vibe.used, 13.92);
+    assert.equal(vibe.limit, 300);
+    assert.equal(vibe.amount, 41.76);
+    assert.equal(vibe.resetsAt, "2026-12-01T00:00:00Z");
+    assert.equal(api.name, "API");
+    assert.equal(api.limit, 30);
+  } finally {
+    upstream.close();
+  }
+});
+
+test("usage hook reports the plan alone when /budget is forbidden", async () => {
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      if (req.url === "/v1/billing/subscription") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ plan_name: "TEAM" }));
+        return;
+      }
+      res.writeHead(403); // member without see_org_inference_usage
+      res.end();
+    });
+  });
+  await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+
+  try {
+    const hooks = await plugin.server({ client: mockClient }, {
+      upstreamBase: `http://127.0.0.1:${upstream.address().port}/v1`,
+    });
+    const usage = await hooks.auth.usage(async () => ({ type: "api", key: "k" }));
+    assert.deepEqual(usage, { plan: "TEAM" });
+  } finally {
+    upstream.close();
+  }
+});
+
+test("usage hook stays empty when billing is unreachable", async () => {
+  const hooks = await plugin.server({ client: mockClient }, {
+    upstreamBase: "http://127.0.0.1:1/v1",
+  });
+  const usage = await hooks.auth.usage(async () => ({ type: "api", key: "k" }));
+  assert.deepEqual(usage, {});
+});
+
 test("usage hook reads a configured usage endpoint", async () => {
   const upstream = http.createServer((req, res) => {
     req.resume();
