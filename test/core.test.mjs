@@ -291,6 +291,78 @@ test("budgetToWindows maps both pools from the live response shape", async () =>
   assert.equal(api.amount, 0.28);
 });
 
+test("budgetToWindows aside marks the pool that does not count", async () => {
+  const { budgetToWindows } = await import("../src/core.mjs");
+  const budget = {
+    vibe_budget: { usage_percentage: 10, initial_budget: 300, currency: "USD" },
+    api_budget: { usage_percentage: 1, initial_budget: 30, currency: "USD" },
+  };
+  const vibeFirst = budgetToWindows(budget, "vibe_budget");
+  assert.equal(vibeFirst[0].aside, false);
+  assert.equal(vibeFirst[1].aside, true);
+  const apiFirst = budgetToWindows(budget, "api_budget");
+  assert.equal(apiFirst[0].aside, true);
+  assert.equal(apiFirst[1].aside, false);
+  const all = budgetToWindows(budget, "all");
+  assert.equal(all[0].aside, false);
+  assert.equal(all[1].aside, false);
+  const none = budgetToWindows(budget, "none");
+  assert.equal(none[0].aside, true, "standby: nothing counts");
+  assert.equal(none[1].aside, true);
+});
+
+test("identifyKey reads the plan_type the whoami endpoint reports", async () => {
+  const { identifyKey } = await import("../src/core.mjs");
+  for (const [planType, want] of [
+    ["CHAT", "vibe"],
+    ["API", "api"],
+  ]) {
+    const upstream = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        assert.equal(req.url, "/api/vibe/whoami");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ plan_type: planType, plan_name: "INDIVIDUAL" }));
+      });
+    });
+    await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+    try {
+      const info = await identifyKey("k", {
+        consoleBase: `http://127.0.0.1:${upstream.address().port}`,
+      });
+      assert.equal(info.keyType, want);
+      assert.equal(info.planType, planType);
+      assert.equal(info.planName, "INDIVIDUAL");
+    } finally {
+      upstream.close();
+    }
+  }
+});
+
+test("identifyKey reports a refused key and an unreachable console", async () => {
+  const { identifyKey } = await import("../src/core.mjs");
+  const refused = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(401);
+      res.end();
+    });
+  });
+  await new Promise((r) => refused.listen(0, "127.0.0.1", r));
+  try {
+    const bad = await identifyKey("k", {
+      consoleBase: `http://127.0.0.1:${refused.address().port}`,
+    });
+    assert.equal(bad.keyType, "unknown");
+    assert.equal(bad.status, 401);
+  } finally {
+    refused.close();
+  }
+  const down = await identifyKey("k", { consoleBase: "http://127.0.0.1:1" });
+  assert.equal(down.keyType, "unknown");
+  assert.equal(down.status, undefined);
+});
+
 test("fetchBilling reads both endpoints and tolerates failures", async () => {
   const { fetchBilling } = await import("../src/core.mjs");
   const upstream = http.createServer((req, res) => {

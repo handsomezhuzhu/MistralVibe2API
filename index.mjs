@@ -8,6 +8,11 @@
  * mistralai Python SDK the CLI ships, with every header that could name the
  * calling harness stripped.
  *
+ * The login tells a Vibe key (plan_type CHAT) from an API key (plan_type
+ * API) and labels the account accordingly, and the usage hook reports the
+ * allowance pool that key's usage is actually billed to, so the routing
+ * strategy can prefer one key type over the other.
+ *
  * Add it with:
  *   magpie plugin add /path/to/MistralVibe2API
  *   magpie plugin login mistral-vibe
@@ -15,25 +20,59 @@
 
 import {
   budgetToWindows,
+  DEFAULT_CONSOLE_BASE,
   fetchBilling,
+  identifyKey,
   loadConfig,
   MODELS,
   openAIModelsFromUpstream,
+  poolForKeyType,
   sanitizeHeaders,
   UPSTREAM_BASE,
   vibeCatalogFromUpstream,
 } from "./src/core.mjs";
 
 const PROVIDER = "mistral-vibe";
+/** Which key type's pool routing should prefer: "vibe" | "api" | "quota". */
+const KEY_PREFERENCES = ["vibe", "api", "quota"];
 
 /** Options accepted as the plugin's second argument (plugins.json "options"). */
 function resolveOptions(options = {}) {
+  const preference = KEY_PREFERENCES.includes(options.keyPreference)
+    ? options.keyPreference
+    : "vibe";
   return {
     upstreamBase: (options.upstreamBase ?? UPSTREAM_BASE).replace(/\/+$/, ""),
+    consoleBase: (options.consoleBase ?? DEFAULT_CONSOLE_BASE).replace(/\/+$/, ""),
     userAgent: options.userAgent,
     extraHeaders: options.extraHeaders,
     usageUrl: options.usageUrl,
+    keyPreference: preference,
   };
+}
+
+/**
+ * The key type of an account: what authorize stored, or a fresh whoami read
+ * for accounts that signed in before the type was recorded.
+ */
+async function keyTypeOf(auth, opts) {
+  const stored = auth?.metadata?.keyType;
+  if (stored === "vibe" || stored === "api") return stored;
+  const info = await identifyKey(auth.key, opts);
+  return info.keyType;
+}
+
+/**
+ * Which pool routing reads for this account, under the preference:
+ * "quota" counts every key's own pool (routing balances by what is left),
+ * while "vibe"/"api" count only the preferred type's pool — the other type
+ * gets "none", its windows all aside: shown on the card but never pulling
+ * traffic, still there for failover once the preferred pool is spent.
+ */
+function countingPool(keyType, preference) {
+  if (preference === "quota") return "all";
+  const own = poolForKeyType(keyType);
+  return own === poolForKeyType(preference) ? own : "none";
 }
 
 // Kept local on purpose: magpie treats every exported function as a plugin,
@@ -58,8 +97,49 @@ const MistralVibePlugin = async (_input, options = {}) => {
       methods: [
         {
           type: "api",
-          label: "Mistral Vibe API key",
-          placeholder: "从 chat.mistral.ai/code/extensions 创建的 Vibe key",
+          label: "Mistral API key",
+          placeholder: "mstrl_…",
+          prompts: [
+            {
+              type: "password",
+              key: "apiKey",
+              message: "Mistral API key",
+              placeholder: "mstrl_…（Vibe key 或 API key 均可，登录时会标明类型）",
+              validate: (value) =>
+                String(value ?? "").trim() ? undefined : "key is required",
+            },
+          ],
+          /**
+           * Validate the key and record what it is. The account is labelled
+           * "vibe · …1f01" or "api · …1f01" so the two kinds are tellable
+           * apart in the account list, and the type is kept in metadata for
+           * the usage hook's pool choice.
+           */
+          async authorize(inputs) {
+            const key = String(inputs?.apiKey ?? inputs?.key ?? "").trim();
+            if (!key) return { type: "failed", error: "key is required" };
+
+            const info = await identifyKey(key, opts);
+            if (info.status === 401 || info.status === 403) {
+              return {
+                type: "failed",
+                error: `Mistral refused the key (${info.status}); check it and try again`,
+              };
+            }
+            const keyType = info.keyType; // "vibe" | "api" | "unknown"
+            const tail = key.length > 4 ? `…${key.slice(-4)}` : key;
+            return {
+              type: "success",
+              key,
+              accountId: `${keyType} · ${tail}`,
+              metadata: {
+                keyType,
+                planType: info.planType,
+                planName: info.planName,
+                checkedAt: new Date().toISOString(),
+              },
+            };
+          },
         },
       ],
       async loader(getAuth) {
@@ -119,13 +199,22 @@ const MistralVibePlugin = async (_input, options = {}) => {
         }
 
         try {
+          const keyType = await keyTypeOf(auth, opts);
           const billing = await fetchBilling(auth.key, opts);
-          const windows = budgetToWindows(billing.budget);
-          const plan = billing.subscription?.plan_name;
-          if (!windows.length) {
+          const planName = billing.subscription?.plan_name ?? auth.metadata?.planName;
+          const plan = planName
+            ? `${planName} · ${keyType === "unknown" ? "unknown" : keyType} key`
+            : undefined;
+
+          if (!billing.budget) {
             // 403/404 on /budget (no permission, self-hosted): plan only.
             return plan ? { plan } : {};
           }
+          const windows = budgetToWindows(
+            billing.budget,
+            countingPool(keyType, opts.keyPreference)
+          );
+          if (!windows.length) return plan ? { plan } : {};
           return { plan, windows };
         } catch (error) {
           return { error: String(error?.message ?? error), windows: [] };
@@ -174,4 +263,10 @@ const MistralVibePlugin = async (_input, options = {}) => {
 export default { id: PROVIDER, server: MistralVibePlugin };
 
 // Helpers for tests; an object export is never treated as a plugin.
-export const _internal = { resolveOptions, sanitizeHeaders, loadConfig };
+export const _internal = {
+  resolveOptions,
+  sanitizeHeaders,
+  loadConfig,
+  keyTypeOf,
+  countingPool,
+};

@@ -4,7 +4,6 @@ on:
   push:
     branches: [master, main]
   pull_request:
-  workflow_dispatch:
 
 jobs:
   test:
@@ -25,39 +24,11 @@ jobs:
       - name: node version
         run: node --version
 
-      - name: Unit + contract tests
+      # Everything runs against local mocks: no key, no network, no quota.
+      # test/live.test.mjs is the real-API regression and skips itself
+      # without MISTRAL_API_KEY, so it is a local-only tool.
+      - name: Unit + contract + simulated integration tests
         run: node --test
 
       - name: Package packs for npm
         run: npm pack --dry-run
-
-  live:
-    name: live regression (real Mistral API)
-    runs-on: ubuntu-latest
-    # Manual dispatch only. Gate on github.event_name alone: the `secrets`
-    # context must not appear in a job-level if (a missing secret there fails
-    # the whole run before any job is created). The key never lives in the
-    # repository — it comes from the MISTRAL_API_KEY repository secret, and
-    # the first step below fails loudly when it is absent.
-    if: ${{ github.event_name == 'workflow_dispatch' }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Fail fast when the secret is missing
-        env:
-          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-        if: ${{ env.MISTRAL_API_KEY == '' }}
-        run: |
-          echo "::error::The MISTRAL_API_KEY repository secret is not set."
-          echo "::error::Add it under Settings -> Secrets and variables -> Actions."
-          exit 1
-
-      - name: Live tests
-        env:
-          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-        run: node --test test/live.test.mjs
-        timeout-minutes: 10

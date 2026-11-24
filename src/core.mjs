@@ -301,6 +301,67 @@ export function mapModel(model, modelMap) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Key type: Vibe key or API key                                      */
+/* ------------------------------------------------------------------ */
+
+export const DEFAULT_CONSOLE_BASE = "https://console.mistral.ai";
+
+/**
+ * Identify what kind of key this is.
+ *
+ * Mistral issues two product areas of key: Vibe keys (created at
+ * chat.mistral.ai/code/extensions, plan_type CHAT) and Studio/API keys
+ * (plan_type API). Both call the same endpoints and both sit on the same
+ * account with its two allowance pools — but their usage is billed to
+ * different pools, which is what the routing strategy keys off.
+ *
+ * The discriminator is the whoami endpoint the CLI itself uses
+ * (vibe/setup/auth/whoami.py): it answers plan_type CHAT for Vibe keys and
+ * API for the others.
+ *
+ * @returns {keyType: "vibe"|"api"|"unknown", planType?, planName?, status?}
+ *   status carries the HTTP code when whoami answered (401 = bad key);
+ *   keyType is "unknown" when whoami could not be reached at all.
+ */
+export async function identifyKey(apiKey, opts = {}) {
+  const consoleBase = (opts.consoleBase ?? DEFAULT_CONSOLE_BASE).replace(/\/+$/, "");
+  const headers = sanitizeHeaders(null, {
+    apiKey,
+    userAgent: opts.userAgent,
+    extraHeaders: opts.extraHeaders,
+  });
+  try {
+    const response = await fetch(`${consoleBase}/api/vibe/whoami`, { headers });
+    if (response.status === 401 || response.status === 403) {
+      return { keyType: "unknown", status: response.status };
+    }
+    if (!response.ok) {
+      return { keyType: "unknown", status: response.status };
+    }
+    const data = await response.json().catch(() => ({}));
+    const planType = typeof data?.plan_type === "string" ? data.plan_type : undefined;
+    return {
+      keyType: planType === "API" ? "api" : planType ? "vibe" : "unknown",
+      planType,
+      planName: typeof data?.plan_name === "string" ? data.plan_name : undefined,
+    };
+  } catch {
+    // whoami unreachable: the key may still be fine, the type is just unknown
+    return { keyType: "unknown" };
+  }
+}
+
+/** The allowance pool a key's own usage is billed to. */
+export function poolForKeyType(keyType) {
+  return keyType === "api" ? "api_budget" : "vibe_budget";
+}
+
+/** The other pool, shown for context but never billed by this key. */
+export function otherPool(pool) {
+  return pool === "api_budget" ? "vibe_budget" : "api_budget";
+}
+
+/* ------------------------------------------------------------------ */
 /* Billing: what the Vibe CLI's own account read uses                 */
 /* ------------------------------------------------------------------ */
 
@@ -342,7 +403,6 @@ function resetSpan(resetAt) {
   const ms = Date.parse(resetAt) - Date.now();
   return ms > 0 ? Math.round(ms / 1000) : undefined;
 }
-
 const CURRENCY_SYMBOLS = { USD: "$", EUR: "€", GBP: "£" };
 
 function money(amount, currency) {
@@ -353,11 +413,19 @@ function money(amount, currency) {
 }
 
 /**
- * Turn a /billing/budget response into magpie usage windows: the Vibe Code
- * allowance and the API allowance are separate pools (confirmed live: $300
- * and $30 per month, both resetting on the 1st UTC).
+ * Turn a /billing/budget response into magpie usage windows.
+ *
+ * `counting` picks which window routing reads:
+ *   - "all": both pools count (the quota-balanced strategy)
+ *   - a pool name ("vibe_budget" / "api_budget"): only that one counts
+ *   - "none": neither counts — every window is aside, so the account shows
+ *     its allowances but routing never sends it traffic while an account
+ *     with a counting window has room (the standby half of a preference)
+ * The pool that is not counted is still attached as an `aside` window: shown
+ * on the account card and in /v1/magpie/quotas, but never counted, so it
+ * never pulls traffic and never holds the account.
  */
-export function budgetToWindows(budget) {
+export function budgetToWindows(budget, counting = "vibe_budget") {
   const windows = [];
   for (const [key, name] of [
     ["vibe_budget", "Vibe Code"],
@@ -378,6 +446,7 @@ export function budgetToWindows(budget) {
       span: resetSpan(pool.reset_at),
       display: `${money(amount, pool.currency)} / ${money(limit, pool.currency)}`,
       payg_enabled: pool.payg_enabled ?? undefined,
+      aside: counting !== "all" && key !== counting,
     });
   }
   return windows;
