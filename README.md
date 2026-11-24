@@ -274,6 +274,8 @@ MISTRAL_API_KEY=mstrl_… node --test test/live.test.mjs   # 线上回归（真�
 - **端到端**（mock 上游）：流式/非流式透传、错误透传、模型别名、`/usage` 统计聚合
 - **线上回归**（`test/live.test.mjs`，需 key）：模型列表、Vibe 表面模型名、工具调用、流式、**自动缓存命中**、billing 双池、插件 usage 钩子读真实数据、客户端指纹防漂移
 
+> 模型可用性**随 key 的套餐和调用方区域而变**：付费 key 能用完整目录；**Free-plan key 只能调 `*-vibe-free` 变体**（1M 版 GLM Flash、DeepSeek 等会 403）；部分托管模型还有区域限制。所以 live 测试会在运行时从 Vibe 目录 + `/v1/models` 的并集里挑一个能用的模型（优先 `zai-glm-5-3-flash-vibe-free`，回退 `mistral-vibe-cli-latest`），挑到的模型没有公开标价或不上报缓存时就带原因 skip 而不是失败——Free key 和付费 key 都能全绿。
+
 ### CI（GitHub Actions）
 
 `.github/workflows/ci.yml` 两个 job：
