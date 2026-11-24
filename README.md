@@ -279,7 +279,7 @@ MISTRAL_API_KEY=mstrl_… node --test test/live.test.mjs   # 线上回归（真�
 `.github/workflows/ci.yml` 两个 job：
 
 - **test**：Node 18/20/22/24 × Ubuntu/Windows/macOS 共 12 个组合跑全量用例 + `npm pack --dry-run` 打包校验。push 到 master/main 和 PR 自动触发
-- **live**：仅手动触发（Actions → CI → Run workflow → 勾选 live），key 从 repository secret `MISTRAL_API_KEY` 注入，**永不进代码**。改完代码后一键验证整条链路（包括 Mistral 侧有没有变动）
+- **live**：仅手动触发（Actions → CI → Run workflow），key 从 repository secret `MISTRAL_API_KEY` 注入，**永不进代码**。改完代码后一键验证整条链路（包括 Mistral 侧有没有变动）
 
 配置方法：仓库 Settings → Secrets and variables → Actions → New repository secret，名 `MISTRAL_API_KEY`，值填 Vibe key。
 
