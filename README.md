@@ -238,6 +238,28 @@ Mistral 有两种 key（同一账户下两条额度池）：**Vibe key**（`chat
 
 只登录了一种 key 时偏好自动失效（唯一的账号照常服务），不会有"偏好导致无账号可用"的问题。
 
+### 偏好怎么在 magpie 路由里生效（重要）
+
+**这不是插件注册的自定义路由策略，而是 usage 窗口通道**：非偏好类型的 key 所有窗口都标 `aside`（magpie 文档：aside 窗口"展示但路由永不读"），于是内置策略把它当作"用量未知"的座位。源码验证过自定义策略拿到的 seats 里没有 key 类型（只有 `key/account/known/used/soon/...`），所以按 key 类型偏好只能走这个通道。
+
+生效前提：**provider / 分组 / 网关 key 的路由必须是会读窗口的策略**——`smart`（默认）、`usage`、`pace` 或 `drain`。若被设成 `order` 或 `rotate`，窗口不被读取，偏好退化成账号列表顺序：
+
+```bash
+magpie gateway-key routing <key-id>   # 查看/设置网关 key 的路由
+magpie group list                     # 查看含 mistral-vibe 模型的分组路由
+```
+
+默认 `smart` 下的行为（阈值来自 magpie 源码 `LowShare=90` / `SpentShare=98`）：
+
+| 偏好池用量 | 行为 |
+| --- | --- |
+| < 90% | 偏好类型的 key 接流量 |
+| 90%–98% | 自动切到 standby key（留余量） |
+| ≥ 98% | standby 服务 |
+| 月初重置 | 自动切回偏好类型 |
+
+想"榨干偏好池再切换"用 `drain` 路由（约 98% 才换）。
+
 模型列表：插件启动时带一份静态目录，严格对齐 Vibe 表面（`mistral-vibe-cli-latest` 等 CLI 线报名 + 目录里的 6 个模型），登录后先向上游 `/v1/model-catalog?surface=vibe-code`（CLI 同款目录）合并账号实际可用的模型，失败再退 `/v1/models`，再失败用静态目录。
 
 ## 方案二：独立反代服务器
